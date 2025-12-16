@@ -16,6 +16,41 @@ sharp.cache(false);
 const MAX_SCREENSHOT_HEIGHT = 5000; // Limit screenshots to 5000px tall
 const MAX_SCREENSHOT_WIDTH = 1600;
 
+const CHROMIUM_LAUNCH_ARGS = [
+  // Essential security/sandboxing
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+
+  // Disable unnecessary features that don't help with screenshots
+  '--disable-web-security',
+  '--disable-features=IsolateOrigins,site-per-process,TranslateUI',
+  '--disable-extensions',
+  '--disable-background-networking',
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-breakpad',
+  '--disable-component-extensions-with-background-pages',
+  '--disable-component-update',
+  '--disable-default-apps',
+  '--disable-hang-monitor',
+  '--disable-ipc-flooding-protection',
+  '--disable-popup-blocking',
+  '--disable-prompt-on-repost',
+  '--disable-renderer-backgrounding',
+  '--disable-sync',
+  '--disable-translate',
+  '--disable-speech-api',
+  '--disable-voice-input',
+
+  // Resource limits
+  '--metrics-recording-only',
+  '--no-first-run',
+  '--safebrowsing-disable-auto-update',
+  '--js-flags=--max-old-space-size=512',
+  '--memory-pressure-off',
+] as const;
+
 // Types
 export interface FreshScraperConfig {
   concurrency: number;
@@ -35,6 +70,86 @@ export interface FreshScraperConfig {
   screenshotJpegQuality: number;
   screenshotWebpQuality: number;
   thumbnailWebpQuality: number;
+}
+
+export const FRESH_SCRAPER_LIMITS = {
+  concurrency: { min: 1, max: 100 },
+  browserInstances: { min: 1, max: 30 },
+  pagesPerBrowser: { min: 1, max: 50 },
+  batchSize: { min: 1, max: 200 },
+  timeout: { min: 5_000, max: 300_000 },
+  screenshotNudgeScrollRatio: { min: 0, max: 0.5 },
+  screenshotQuality: { min: 1, max: 100 }
+} as const;
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function clampOptionalInt(value: unknown, min: number, max: number): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return Math.trunc(clampNumber(parsed, min, max));
+}
+
+function clampOptionalFloat(value: unknown, min: number, max: number): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return clampNumber(parsed, min, max);
+}
+
+export function clampFreshScraperConfig(config: Partial<FreshScraperConfig>): Partial<FreshScraperConfig> {
+  const out: Partial<FreshScraperConfig> = {};
+
+  const clampedConcurrency = clampOptionalInt(config.concurrency, FRESH_SCRAPER_LIMITS.concurrency.min, FRESH_SCRAPER_LIMITS.concurrency.max);
+  if (clampedConcurrency !== undefined) out.concurrency = clampedConcurrency;
+
+  const clampedBrowsers = clampOptionalInt(config.browserInstances, FRESH_SCRAPER_LIMITS.browserInstances.min, FRESH_SCRAPER_LIMITS.browserInstances.max);
+  if (clampedBrowsers !== undefined) out.browserInstances = clampedBrowsers;
+
+  const clampedPages = clampOptionalInt(config.pagesPerBrowser, FRESH_SCRAPER_LIMITS.pagesPerBrowser.min, FRESH_SCRAPER_LIMITS.pagesPerBrowser.max);
+  if (clampedPages !== undefined) out.pagesPerBrowser = clampedPages;
+
+  const clampedBatchSize = clampOptionalInt(config.batchSize, FRESH_SCRAPER_LIMITS.batchSize.min, FRESH_SCRAPER_LIMITS.batchSize.max);
+  if (clampedBatchSize !== undefined) out.batchSize = clampedBatchSize;
+
+  const clampedTimeout = clampOptionalInt(config.timeout, FRESH_SCRAPER_LIMITS.timeout.min, FRESH_SCRAPER_LIMITS.timeout.max);
+  if (clampedTimeout !== undefined) out.timeout = clampedTimeout;
+
+  const clampedNudge = clampOptionalFloat(config.screenshotNudgeScrollRatio, FRESH_SCRAPER_LIMITS.screenshotNudgeScrollRatio.min, FRESH_SCRAPER_LIMITS.screenshotNudgeScrollRatio.max);
+  if (clampedNudge !== undefined) out.screenshotNudgeScrollRatio = clampedNudge;
+
+  const clampedAnim = clampOptionalInt(config.screenshotAnimationWaitMs, 0, 30_000);
+  if (clampedAnim !== undefined) out.screenshotAnimationWaitMs = clampedAnim;
+
+  const clampedNudgeWait = clampOptionalInt(config.screenshotNudgeWaitMs, 0, 30_000);
+  if (clampedNudgeWait !== undefined) out.screenshotNudgeWaitMs = clampedNudgeWait;
+
+  const clampedNudgeAfter = clampOptionalInt(config.screenshotNudgeAfterMs, 0, 30_000);
+  if (clampedNudgeAfter !== undefined) out.screenshotNudgeAfterMs = clampedNudgeAfter;
+
+  const clampedStable = clampOptionalInt(config.screenshotStabilityStableMs, 0, 30_000);
+  if (clampedStable !== undefined) out.screenshotStabilityStableMs = clampedStable;
+
+  const clampedStableMax = clampOptionalInt(config.screenshotStabilityMaxWaitMs, 0, 60_000);
+  if (clampedStableMax !== undefined) out.screenshotStabilityMaxWaitMs = clampedStableMax;
+
+  const clampedStableInterval = clampOptionalInt(config.screenshotStabilityCheckIntervalMs, 50, 10_000);
+  if (clampedStableInterval !== undefined) out.screenshotStabilityCheckIntervalMs = clampedStableInterval;
+
+  const clampedJpeg = clampOptionalInt(config.screenshotJpegQuality, FRESH_SCRAPER_LIMITS.screenshotQuality.min, FRESH_SCRAPER_LIMITS.screenshotQuality.max);
+  if (clampedJpeg !== undefined) out.screenshotJpegQuality = clampedJpeg;
+
+  const clampedWebp = clampOptionalInt(config.screenshotWebpQuality, FRESH_SCRAPER_LIMITS.screenshotQuality.min, FRESH_SCRAPER_LIMITS.screenshotQuality.max);
+  if (clampedWebp !== undefined) out.screenshotWebpQuality = clampedWebp;
+
+  const clampedThumb = clampOptionalInt(config.thumbnailWebpQuality, FRESH_SCRAPER_LIMITS.screenshotQuality.min, FRESH_SCRAPER_LIMITS.screenshotQuality.max);
+  if (clampedThumb !== undefined) out.thumbnailWebpQuality = clampedThumb;
+
+  return out;
 }
 
 export interface TemplatePhase {
@@ -132,16 +247,19 @@ type BrowserScrapeResult = BrowserScrapeSuccess | BrowserScrapeFailure;
 
 // Simple semaphore for concurrency control
 class Semaphore {
-  private permits: number;
+  private maxPermits: number;
+  private availablePermits: number;
   private waiting: (() => void)[] = [];
 
   constructor(permits: number) {
-    this.permits = permits;
+    const initial = Math.max(1, Math.trunc(permits));
+    this.maxPermits = initial;
+    this.availablePermits = initial;
   }
 
   async acquire(): Promise<void> {
-    if (this.permits > 0) {
-      this.permits--;
+    if (this.availablePermits > 0) {
+      this.availablePermits--;
       return;
     }
     return new Promise(resolve => {
@@ -154,26 +272,25 @@ class Semaphore {
       const next = this.waiting.shift();
       next?.();
     } else {
-      this.permits++;
+      this.availablePermits = Math.min(this.maxPermits, this.availablePermits + 1);
     }
   }
 
   setPermits(newPermits: number): void {
-    const diff = newPermits - this.permits - this.waiting.length;
-    if (diff > 0) {
-      this.permits += diff;
-      // Wake up waiting tasks
-      while (this.permits > 0 && this.waiting.length > 0) {
-        this.permits--;
-        const next = this.waiting.shift();
-        next?.();
-      }
+    const nextMax = Math.max(1, Math.trunc(newPermits));
+    const delta = nextMax - this.maxPermits;
+    this.maxPermits = nextMax;
+    this.availablePermits = clampNumber(this.availablePermits + delta, 0, this.maxPermits);
+
+    while (this.availablePermits > 0 && this.waiting.length > 0) {
+      this.availablePermits--;
+      const next = this.waiting.shift();
+      next?.();
     }
-    // If diff < 0, we just let permits naturally decrease as tasks complete
   }
 
   getAvailable(): number {
-    return this.permits;
+    return this.availablePermits;
   }
 
   getWaiting(): number {
@@ -225,26 +342,27 @@ export class FreshScraper extends EventEmitter {
 
   constructor(config: Partial<FreshScraperConfig> = {}) {
     super();
+    const sanitized = clampFreshScraperConfig(config);
     this.config = {
-      concurrency: config.concurrency || 5,
-      browserInstances: config.browserInstances || 2,
-      pagesPerBrowser: config.pagesPerBrowser || 5,
-      batchSize: config.batchSize || 50,
-      timeout: config.timeout || 60000,
+      concurrency: sanitized.concurrency ?? 5,
+      browserInstances: sanitized.browserInstances ?? 2,
+      pagesPerBrowser: sanitized.pagesPerBrowser ?? 5,
+      batchSize: sanitized.batchSize ?? 50,
+      timeout: sanitized.timeout ?? 60000,
 
       // Screenshot defaults tuned for reliable animation settling
-      screenshotAnimationWaitMs: config.screenshotAnimationWaitMs ?? 3000,
-      screenshotNudgeScrollRatio: config.screenshotNudgeScrollRatio ?? 0.2,
-      screenshotNudgeWaitMs: config.screenshotNudgeWaitMs ?? 500,
-      screenshotNudgeAfterMs: config.screenshotNudgeAfterMs ?? 500,
-      screenshotStabilityStableMs: config.screenshotStabilityStableMs ?? 1000,
-      screenshotStabilityMaxWaitMs: config.screenshotStabilityMaxWaitMs ?? 7000,
-      screenshotStabilityCheckIntervalMs: config.screenshotStabilityCheckIntervalMs ?? 250,
+      screenshotAnimationWaitMs: sanitized.screenshotAnimationWaitMs ?? 3000,
+      screenshotNudgeScrollRatio: sanitized.screenshotNudgeScrollRatio ?? 0.2,
+      screenshotNudgeWaitMs: sanitized.screenshotNudgeWaitMs ?? 500,
+      screenshotNudgeAfterMs: sanitized.screenshotNudgeAfterMs ?? 500,
+      screenshotStabilityStableMs: sanitized.screenshotStabilityStableMs ?? 1000,
+      screenshotStabilityMaxWaitMs: sanitized.screenshotStabilityMaxWaitMs ?? 7000,
+      screenshotStabilityCheckIntervalMs: sanitized.screenshotStabilityCheckIntervalMs ?? 250,
 
       // Screenshot quality defaults
-      screenshotJpegQuality: config.screenshotJpegQuality ?? 80,
-      screenshotWebpQuality: config.screenshotWebpQuality ?? 75,
-      thumbnailWebpQuality: config.thumbnailWebpQuality ?? 60
+      screenshotJpegQuality: sanitized.screenshotJpegQuality ?? 80,
+      screenshotWebpQuality: sanitized.screenshotWebpQuality ?? 75,
+      thumbnailWebpQuality: sanitized.thumbnailWebpQuality ?? 60
     };
     this.semaphore = new Semaphore(this.config.concurrency);
     this.imageSemaphore = new Semaphore(this.getDesiredImageConcurrency());
@@ -505,6 +623,41 @@ export class FreshScraper extends EventEmitter {
     });
   }
 
+  private async launchBrowser(): Promise<Browser> {
+    return chromium.launch({
+      headless: true,
+      args: [...CHROMIUM_LAUNCH_ARGS]
+    });
+  }
+
+  private wakeOnePageWaiter(): void {
+    if (this.pageWaiters.length > 0) {
+      const waiter = this.pageWaiters.shift();
+      waiter?.();
+    }
+  }
+
+  private async replaceBrowserItem(item: BrowserPoolItem, reason: string): Promise<boolean> {
+    this.log('warn', `Replacing browser instance (${reason})`);
+    try { await item.context.close(); } catch {}
+    try { await item.browser.close(); } catch {}
+
+    try {
+      const browser = await this.launchBrowser();
+      const context = await this.newContext(browser);
+      item.browser = browser;
+      item.context = context;
+      item.pagesInUse = 0;
+      item.maxPages = this.config.pagesPerBrowser;
+      item.usageCount = 0;
+      this.wakeOnePageWaiter();
+      return true;
+    } catch (error) {
+      this.log('error', `Failed to replace browser: ${error}`);
+      return false;
+    }
+  }
+
   async initBrowserPool(): Promise<void> {
     // Calculate how many browsers we need based on concurrency
     // Each browser can have pagesPerBrowser pages, so we need enough browsers
@@ -519,50 +672,15 @@ export class FreshScraper extends EventEmitter {
 
     this.log('info', `Creating ${actualBrowserInstances} browser instances (concurrency=${this.config.concurrency}, pagesPerBrowser=${this.config.pagesPerBrowser})...`);
 
-    const launchArgs = [
-      // Essential security/sandboxing
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
+    const browsers: Browser[] = [];
+    const contexts: BrowserContext[] = [];
 
-      // Disable unnecessary features that don't help with screenshots
-      '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process,TranslateUI',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-breakpad',
-      '--disable-component-extensions-with-background-pages',
-      '--disable-component-update',
-      '--disable-default-apps',
-      '--disable-hang-monitor',
-      '--disable-ipc-flooding-protection',
-      '--disable-popup-blocking',
-      '--disable-prompt-on-repost',
-      '--disable-renderer-backgrounding',
-      '--disable-sync',
-      '--disable-translate',
-      '--disable-speech-api',
-      '--disable-voice-input',
-
-      // Resource limits
-      '--metrics-recording-only',
-      '--no-first-run',
-      '--safebrowsing-disable-auto-update',
-      '--js-flags=--max-old-space-size=512',
-      '--memory-pressure-off',
-    ];
-
-    const browserPromises = Array.from({ length: actualBrowserInstances }, () =>
-      chromium.launch({
-        headless: true,
-        args: launchArgs
-      })
-    );
-
-    const browsers = await Promise.all(browserPromises);
-    const contexts = await Promise.all(browsers.map(b => this.newContext(b)));
+    for (let i = 0; i < actualBrowserInstances; i++) {
+      const browser = await this.launchBrowser();
+      const context = await this.newContext(browser);
+      browsers.push(browser);
+      contexts.push(context);
+    }
 
     this.browserPool = browsers.map((browser, i) => ({
       browser,
@@ -591,6 +709,10 @@ export class FreshScraper extends EventEmitter {
   private async getAvailablePage(): Promise<{ page: Page; browserItem: BrowserPoolItem } | null> {
     for (const item of this.browserPool) {
       if (item.pagesInUse < item.maxPages) {
+        if (!item.browser.isConnected()) {
+          await this.replaceBrowserItem(item, 'browser disconnected');
+        }
+
         try {
           const page = await item.context.newPage();
           item.pagesInUse++;
@@ -608,6 +730,16 @@ export class FreshScraper extends EventEmitter {
             return { page, browserItem: item };
           } catch (recreateError) {
             this.log('error', `Failed to recreate context: ${recreateError}`);
+            const replaced = await this.replaceBrowserItem(item, 'context recreation failed');
+            if (!replaced) continue;
+            try {
+              const page = await item.context.newPage();
+              item.pagesInUse++;
+              item.usageCount++;
+              return { page, browserItem: item };
+            } catch (finalError) {
+              this.log('error', `Failed to create page after browser replacement: ${finalError}`);
+            }
             continue;
           }
         }
@@ -625,7 +757,16 @@ export class FreshScraper extends EventEmitter {
     // Wait for a page to be released
     while (!pageInfo && !this.isStopped) {
       await new Promise<void>(resolve => {
-        this.pageWaiters.push(resolve);
+        const waiter = () => {
+          clearTimeout(timeoutId);
+          resolve();
+        };
+        const timeoutId = setTimeout(() => {
+          const idx = this.pageWaiters.indexOf(waiter);
+          if (idx >= 0) this.pageWaiters.splice(idx, 1);
+          resolve();
+        }, 1000);
+        this.pageWaiters.push(waiter);
       });
       pageInfo = await this.getAvailablePage();
     }
@@ -639,28 +780,26 @@ export class FreshScraper extends EventEmitter {
   private releasePage(browserItem: BrowserPoolItem): void {
     browserItem.pagesInUse = Math.max(0, browserItem.pagesInUse - 1);
     // Notify one waiter that a page is available
-    if (this.pageWaiters.length > 0) {
-      const waiter = this.pageWaiters.shift();
-      waiter?.();
-    }
+    this.wakeOnePageWaiter();
   }
 
   updateConfig(newConfig: Partial<FreshScraperConfig>): void {
+    const sanitized = clampFreshScraperConfig(newConfig);
     const oldBrowserInstances = this.config.browserInstances;
     const oldConcurrency = this.config.concurrency;
     const oldPagesPerBrowser = this.config.pagesPerBrowser;
 
-    this.config = { ...this.config, ...newConfig };
+    this.config = { ...this.config, ...sanitized };
 
     // Update semaphore if concurrency changed
-    if (newConfig.concurrency !== undefined && newConfig.concurrency !== oldConcurrency) {
-      this.semaphore.setPermits(newConfig.concurrency);
+    if (sanitized.concurrency !== undefined && sanitized.concurrency !== oldConcurrency) {
+      this.semaphore.setPermits(sanitized.concurrency);
       this.imageSemaphore.setPermits(this.getDesiredImageConcurrency());
       this.updateSharpConcurrency();
     }
 
     // Apply pagesPerBrowser immediately to existing pool capacity if possible
-    if (newConfig.pagesPerBrowser !== undefined && newConfig.pagesPerBrowser !== oldPagesPerBrowser) {
+    if (sanitized.pagesPerBrowser !== undefined && sanitized.pagesPerBrowser !== oldPagesPerBrowser) {
       for (const item of this.browserPool) {
         item.maxPages = this.config.pagesPerBrowser;
       }
@@ -671,7 +810,7 @@ export class FreshScraper extends EventEmitter {
     const currentMaxPages = this.browserPool.length * this.config.pagesPerBrowser;
 
     // If browser instances changed OR we need more browsers for concurrency
-    if ((newConfig.browserInstances !== undefined && newConfig.browserInstances !== oldBrowserInstances) ||
+    if ((sanitized.browserInstances !== undefined && sanitized.browserInstances !== oldBrowserInstances) ||
         (minBrowsersNeeded > this.browserPool.length)) {
       if (minBrowsersNeeded > this.config.browserInstances) {
         this.config.browserInstances = minBrowsersNeeded;

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { FreshScraper, FreshScraperConfig, ScrapeState } from '@/lib/scraper/fresh-scraper';
+import { FreshScraper, FreshScraperConfig, ScrapeState, clampFreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 
 // Store the active scraper instance
 let activeScraper: FreshScraper | null = null;
@@ -103,25 +103,29 @@ export async function POST(request: NextRequest) {
           [stateId]
         );
 
-        const scraperConfig: FreshScraperConfig = state?.config
-          ? JSON.parse(state.config)
-          : {
-            concurrency: config?.concurrency || 5,
-            browserInstances: config?.browserInstances || 2,
-            pagesPerBrowser: config?.pagesPerBrowser || 5,
-            batchSize: config?.batchSize || 10,
-            timeout: config?.timeout || 45000,
-            screenshotAnimationWaitMs: config?.screenshotAnimationWaitMs ?? 3000,
-            screenshotNudgeScrollRatio: config?.screenshotNudgeScrollRatio ?? 0.2,
-            screenshotNudgeWaitMs: config?.screenshotNudgeWaitMs ?? 500,
-            screenshotNudgeAfterMs: config?.screenshotNudgeAfterMs ?? 500,
-            screenshotStabilityStableMs: config?.screenshotStabilityStableMs ?? 1000,
-            screenshotStabilityMaxWaitMs: config?.screenshotStabilityMaxWaitMs ?? 7000,
-            screenshotStabilityCheckIntervalMs: config?.screenshotStabilityCheckIntervalMs ?? 250,
-            screenshotJpegQuality: config?.screenshotJpegQuality ?? 80,
-            screenshotWebpQuality: config?.screenshotWebpQuality ?? 75,
-            thumbnailWebpQuality: config?.thumbnailWebpQuality ?? 60
-          };
+        const baseDefaults: FreshScraperConfig = {
+          concurrency: 5,
+          browserInstances: 2,
+          pagesPerBrowser: 5,
+          batchSize: 10,
+          timeout: 45000,
+          screenshotAnimationWaitMs: 3000,
+          screenshotNudgeScrollRatio: 0.2,
+          screenshotNudgeWaitMs: 500,
+          screenshotNudgeAfterMs: 500,
+          screenshotStabilityStableMs: 1000,
+          screenshotStabilityMaxWaitMs: 7000,
+          screenshotStabilityCheckIntervalMs: 250,
+          screenshotJpegQuality: 80,
+          screenshotWebpQuality: 75,
+          thumbnailWebpQuality: 60
+        };
+
+        const rawConfig = state?.config ? JSON.parse(state.config) : (config || {});
+        const scraperConfig: FreshScraperConfig = {
+          ...baseDefaults,
+          ...(clampFreshScraperConfig(rawConfig) as Partial<FreshScraperConfig>)
+        };
 
         // Reset events
         scraperEvents.logs = [];
@@ -341,6 +345,7 @@ export async function GET(request: NextRequest) {
         const realState = activeScraper?.getRealTimeState() || scraperEvents.realTimeState;
         const scrapeState = activeScraper?.getScrapeState() || scraperEvents.scrapeState;
         return NextResponse.json({
+          isRunning: !!activeScraper,
           logs: scraperEvents.logs.slice(0, 50),
           currentBatch: activeScraper?.getCurrentBatch() || scraperEvents.currentBatch,
           recentScreenshots: scraperEvents.recentScreenshots.slice(0, 30),

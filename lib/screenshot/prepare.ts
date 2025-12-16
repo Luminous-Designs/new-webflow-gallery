@@ -169,10 +169,10 @@ async function waitForAnimationsToSettle(
   let lastBodyHeight: number | null = null;
 
   while (Date.now() - start < opts.maxWaitMs) {
-    const state = await page.evaluate(() => {
-      const anims = typeof document.getAnimations === 'function'
-        ? document.getAnimations({ subtree: true })
-        : [];
+	    const state = await page.evaluate(() => {
+	      const anims = typeof document.getAnimations === 'function'
+	        ? (document.getAnimations as unknown as (options?: { subtree?: boolean }) => Animation[])({ subtree: true })
+	        : [];
 
       let runningFinite = 0;
       for (const a of anims) {

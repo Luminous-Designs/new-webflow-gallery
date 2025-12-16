@@ -118,6 +118,14 @@ interface ScreenshotRow {
   captured_at: string;
 }
 
+interface LastScreenshotInfo {
+  template_name: string | null;
+  template_slug: string | null;
+  screenshot_thumbnail_path: string | null;
+  screenshot_path: string | null;
+  captured_at: string;
+}
+
 // Real-time scraper metrics (from backend)
 interface RealTimeState {
   activeBrowsers: number;
@@ -153,6 +161,15 @@ interface PersistentScrapeState {
   remainingUrls: string[];
   startedAt: string | null;
   pausedAt: string | null;
+}
+
+interface NewTemplateDiscoveryState {
+  phase: 'idle' | 'checking' | 'checked' | 'error';
+  totalInSitemap: number;
+  existingInDb: number;
+  missingCount: number;
+  missingTemplates: Array<{ url: string; slug: string; displayName: string }>;
+  error: string | null;
 }
 
 // Helper components
@@ -340,7 +357,7 @@ function PerformanceControls({
             value={[config.concurrency]}
             onValueChange={([value]) => onChange({ concurrency: value })}
             min={1}
-            max={20}
+            max={100}
             step={1}
             disabled={disabled}
             className="cursor-pointer"
@@ -366,7 +383,7 @@ function PerformanceControls({
             value={[config.browserInstances]}
             onValueChange={([value]) => onChange({ browserInstances: value })}
             min={1}
-            max={10}
+            max={30}
             step={1}
             disabled={disabled}
             className="cursor-pointer"
@@ -388,7 +405,7 @@ function PerformanceControls({
             value={[config.batchSize]}
             onValueChange={([value]) => onChange({ batchSize: value })}
             min={5}
-            max={50}
+            max={200}
             step={5}
             disabled={disabled}
             className="cursor-pointer"
@@ -1348,6 +1365,8 @@ export function FreshScraperSection() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [scrapeState, setScrapeState] = useState<FreshScrapeState | null>(null);
   const [pausedState, setPausedState] = useState<FreshScrapeState | null>(null);
+  const [pausedLastScreenshot, setPausedLastScreenshot] = useState<LastScreenshotInfo | null>(null);
+  const [activeLastScreenshot, setActiveLastScreenshot] = useState<LastScreenshotInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 	  const [config, setConfig] = useState<FreshScrapeConfig>({
 	    concurrency: 5,
@@ -1374,6 +1393,15 @@ export function FreshScraperSection() {
   const [estimatedSeconds, setEstimatedSeconds] = useState(0);
   const [isExecuting, setIsExecuting] = useState(false);
   const [realTimeState, setRealTimeState] = useState<RealTimeState | null>(null);
+  const [executorIsRunning, setExecutorIsRunning] = useState(false);
+  const [newTemplateDiscovery, setNewTemplateDiscovery] = useState<NewTemplateDiscoveryState>({
+    phase: 'idle',
+    totalInSitemap: 0,
+    existingInDb: 0,
+    missingCount: 0,
+    missingTemplates: [],
+    error: null
+  });
 
   // Speed tracking
   const [speedHistory, setSpeedHistory] = useState<number[]>([]);
@@ -1403,6 +1431,8 @@ export function FreshScraperSection() {
           if (data.pausedState) {
             setPausedState(data.pausedState);
           }
+          setPausedLastScreenshot(data.pausedLastScreenshot || null);
+          setActiveLastScreenshot(data.activeLastScreenshot || null);
         }
       } catch (error) {
         console.error('Failed to fetch status:', error);
@@ -1543,6 +1573,7 @@ export function FreshScraperSection() {
 
         if (eventsResponse.ok) {
           const events = await eventsResponse.json();
+          setExecutorIsRunning(!!events.isRunning);
           setCurrentBatch(events.currentBatch || []);
           setLogs(events.logs || []);
           // Update real-time state from actual scraper
@@ -1573,6 +1604,91 @@ export function FreshScraperSection() {
   // Start fresh scrape
   const startFreshScrape = async () => {
     setShowDeleteDialog(true);
+  };
+
+  const checkForNewTemplates = async () => {
+    setNewTemplateDiscovery({
+      phase: 'checking',
+      totalInSitemap: 0,
+      existingInDb: 0,
+      missingCount: 0,
+      missingTemplates: [],
+      error: null
+    });
+
+    try {
+      const response = await fetch('/api/admin/fresh-scrape', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${resolveAuthToken()}`
+        },
+        body: JSON.stringify({ action: 'check_new' })
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to check for new templates');
+      }
+
+      const data = await response.json();
+      const discovery = data.discovery;
+
+      setNewTemplateDiscovery({
+        phase: 'checked',
+        totalInSitemap: discovery.totalInSitemap || 0,
+        existingInDb: discovery.existingInDb || 0,
+        missingCount: discovery.missingCount || 0,
+        missingTemplates: discovery.missingTemplates || [],
+        error: null
+      });
+
+      if ((discovery.missingCount || 0) > 0) {
+        toast.success(`Found ${discovery.missingCount} missing template${discovery.missingCount === 1 ? '' : 's'}`);
+      } else {
+        toast.info('No new templates found');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to check for new templates';
+      setNewTemplateDiscovery(prev => ({ ...prev, phase: 'error', error: message }));
+      toast.error(message);
+    }
+  };
+
+  const startMissingTemplateScrape = async () => {
+    if (newTemplateDiscovery.missingCount === 0) return;
+    if (!confirm(`Scrape ${newTemplateDiscovery.missingCount} missing template${newTemplateDiscovery.missingCount === 1 ? '' : 's'} now?`)) {
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/admin/fresh-scrape', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${resolveAuthToken()}`
+        },
+        body: JSON.stringify({
+          action: 'start_update',
+          totalSitemapCount: newTemplateDiscovery.totalInSitemap,
+          config
+        })
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to start update scrape');
+      }
+
+      const data = await response.json();
+      if (data.state) {
+        setScrapeState(data.state);
+        await executeBatches(data.state);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to start update scrape';
+      toast.error(message);
+    }
   };
 
   // Confirm delete and start
@@ -1659,27 +1775,52 @@ export function FreshScraperSection() {
         toast.info('No templates to scrape');
         return;
       }
+      // Resume from persisted progress so batch size can change safely mid-scrape.
+      let offset = Math.max(0, state.regular_processed || 0);
 
-      const batchSize = config.batchSize;
-      const totalBatches = Math.ceil(urls.length / batchSize);
-
-      for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
-        // Check if paused
+      while (offset < urls.length) {
+        // Stop if DB says we're paused/cancelled/completed
         const statusResponse = await fetch('/api/admin/fresh-scrape?action=status', {
           headers: { 'Authorization': `Bearer ${resolveAuthToken()}` }
         });
 
         if (statusResponse.ok) {
           const statusData = await statusResponse.json();
-          if (statusData.activeState?.status === 'paused') {
+          const active = statusData.activeState as FreshScrapeState | null;
+          const paused = statusData.pausedState as FreshScrapeState | null;
+
+          if (paused?.id === state.id && paused.status === 'paused') {
             toast.info('Scrape paused');
             break;
           }
+
+          if (!active && !paused) {
+            toast.info('Scrape is no longer active');
+            break;
+          }
+
+          if (active?.id === state.id) {
+            setScrapeState(active);
+            offset = Math.max(offset, active.regular_processed || 0);
+          }
         }
 
-        const batchUrls = urls.slice(batchIndex * batchSize, (batchIndex + 1) * batchSize);
+        // If a batch is already running (e.g. resumed mid-batch), wait for it to finish.
+        const execStatusResponse = await fetch('/api/admin/fresh-scrape/execute?action=status', {
+          headers: { 'Authorization': `Bearer ${resolveAuthToken()}` }
+        });
+        if (execStatusResponse.ok) {
+          const execStatus = await execStatusResponse.json();
+          if (execStatus.isRunning) {
+            await waitForBatchCompletion();
+            continue;
+          }
+        }
 
-        // Start batch
+        const nextBatchSize = Math.max(1, config.batchSize);
+        const batchUrls = urls.slice(offset, offset + nextBatchSize);
+        if (batchUrls.length === 0) break;
+
         const batchResponse = await fetch('/api/admin/fresh-scrape/execute', {
           method: 'POST',
           headers: {
@@ -1696,39 +1837,49 @@ export function FreshScraperSection() {
         });
 
         if (!batchResponse.ok) {
-          throw new Error('Batch execution failed');
+          let message = 'Batch execution failed';
+          try {
+            const data = await batchResponse.json();
+            message = data?.error || message;
+          } catch {
+            // Ignore
+          }
+          throw new Error(message);
         }
 
-        // Wait for batch to complete
         await waitForBatchCompletion();
 
-        // Update batch index
+        // Refresh persisted progress after each batch.
+        const progressResponse = await fetch(
+          `/api/admin/fresh-scrape?action=progress&stateId=${state.id}`,
+          { headers: { 'Authorization': `Bearer ${resolveAuthToken()}` } }
+        );
+        if (progressResponse.ok) {
+          const progressData = await progressResponse.json();
+          if (progressData?.state) {
+            setScrapeState(progressData.state);
+            offset = Math.max(offset, progressData.state.regular_processed || 0);
+          } else {
+            offset += batchUrls.length;
+          }
+        } else {
+          offset += batchUrls.length;
+        }
+      }
+
+      if (offset >= urls.length) {
         await fetch('/api/admin/fresh-scrape', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${resolveAuthToken()}`
           },
-          body: JSON.stringify({
-            action: 'update_progress',
-            stateId: state.id,
-            batchIndex: batchIndex + 1
-          })
+          body: JSON.stringify({ action: 'complete', stateId: state.id })
         });
+
+        toast.success('Fresh scrape completed!');
+        loadStats();
       }
-
-      // Mark complete
-      await fetch('/api/admin/fresh-scrape', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${resolveAuthToken()}`
-        },
-        body: JSON.stringify({ action: 'complete', stateId: state.id })
-      });
-
-      toast.success('Fresh scrape completed!');
-      loadStats();
 
     } catch (error) {
       console.error('Batch execution error:', error);
@@ -1802,16 +1953,31 @@ export function FreshScraperSection() {
         body: JSON.stringify({ action: 'resume' })
       });
 
+      let nextState: FreshScrapeState | null = null;
       if (response.ok) {
         const data = await response.json();
-        setScrapeState(data.state);
+        nextState = data.state || null;
+        setScrapeState(nextState);
         setPausedState(null);
+      }
 
-        // Continue executing batches
-        if (data.state) {
-          await executeBatches(data.state);
-        }
+      // Resume any in-progress/paused batch executor (if present).
+      await fetch('/api/admin/fresh-scrape/execute', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${resolveAuthToken()}`
+        },
+        body: JSON.stringify({ action: 'resume' })
+      }).catch(() => {});
 
+      if (isExecuting) {
+        toast.success('Scrape resumed');
+        return;
+      }
+
+      if (nextState) {
+        await executeBatches(nextState);
         toast.success('Scrape resumed');
       }
     } catch (error) {
@@ -1965,9 +2131,12 @@ export function FreshScraperSection() {
   // Active scrape - Control Center View
   if (scrapeState && !['completed', 'failed', 'idle'].includes(scrapeState.status) && scrapeState.phase !== 'none') {
     const totalProcessed = (scrapeState.featured_processed || 0) + (scrapeState.regular_processed || 0);
+    const totalCount = (scrapeState.featured_total || 0) + (scrapeState.regular_total || 0);
     const isScrapePhase = scrapeState.status === 'scraping_featured' || scrapeState.status === 'scraping_regular';
-    const isActuallyRunning = !!realTimeState && !realTimeState.isPaused && !realTimeState.isStopped && !realTimeState.isTimeoutPaused;
+    const isActuallyRunning = executorIsRunning && !!realTimeState && !realTimeState.isPaused && !realTimeState.isStopped && !realTimeState.isTimeoutPaused;
     const isReadyToBegin = isScrapePhase && totalProcessed === 0 && !isActuallyRunning && scrapeState.status !== 'paused';
+    const hasRemainingWork = totalCount > totalProcessed;
+    const isInterrupted = isScrapePhase && hasRemainingWork && !executorIsRunning && scrapeState.status !== 'paused' && !isExecuting;
 
     return (
       <div className="space-y-6">
@@ -1985,6 +2154,16 @@ export function FreshScraperSection() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {isInterrupted && (
+              <Button
+                onClick={beginScrape}
+                disabled={isExecuting}
+                className="bg-green-600 hover:bg-green-700"
+              >
+                <Play className="h-4 w-4 mr-2" />
+                Continue
+              </Button>
+            )}
             {isReadyToBegin && (
               <Button
                 onClick={beginScrape}
@@ -2003,7 +2182,7 @@ export function FreshScraperSection() {
                 <Play className="h-4 w-4 mr-2" />
                 Resume
               </Button>
-            ) : !isReadyToBegin ? (
+            ) : executorIsRunning && !isReadyToBegin ? (
               <Button
                 variant="outline"
                 onClick={pauseScrape}
@@ -2029,8 +2208,8 @@ export function FreshScraperSection() {
         <SpeedIndicator
           speedHistory={speedHistory}
           currentSpeed={currentSpeed}
-          totalCount={(scrapeState.featured_total || 0) + (scrapeState.regular_total || 0)}
-          totalProcessed={(scrapeState.featured_processed || 0) + (scrapeState.regular_processed || 0)}
+          totalCount={totalCount}
+          totalProcessed={totalProcessed}
         />
 
         {/* Real-Time Scraper Metrics - Shows ACTUAL state, not configured */}
@@ -2139,11 +2318,27 @@ export function FreshScraperSection() {
               <div className="p-3 bg-amber-100 rounded-xl">
                 <AlertCircle className="h-6 w-6 text-amber-600" />
               </div>
+              {pausedLastScreenshot?.screenshot_thumbnail_path && (
+                <div className="relative w-12 h-12 rounded-lg overflow-hidden border border-amber-200 bg-white">
+                  <Image
+                    src={pausedLastScreenshot.screenshot_thumbnail_path}
+                    alt={pausedLastScreenshot.template_name || pausedLastScreenshot.template_slug || 'Last template'}
+                    fill
+                    sizes="48px"
+                    className="object-cover"
+                  />
+                </div>
+              )}
               <div>
                 <h3 className="font-semibold text-amber-800">Paused Scrape Found</h3>
                 <p className="text-sm text-amber-700">
                   {pausedState.regular_processed} of {pausedState.regular_total} templates processed
                 </p>
+                {(pausedLastScreenshot?.template_name || pausedLastScreenshot?.template_slug) && (
+                  <p className="text-xs text-amber-700 mt-0.5">
+                    Last captured: <span className="font-medium">{pausedLastScreenshot.template_name || pausedLastScreenshot.template_slug}</span>
+                  </p>
+                )}
               </div>
             </div>
             <div className="flex gap-3">
@@ -2240,6 +2435,98 @@ export function FreshScraperSection() {
           </div>
         </Card>
       </div>
+
+      {/* Check for New Templates */}
+      <Card className="p-6 border border-slate-200 bg-white">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+              <Globe className="h-5 w-5 text-blue-600" />
+              Check for New Templates
+            </h3>
+            <p className="text-sm text-gray-500">
+              Scan the Webflow sitemap and find templates missing from your gallery.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            onClick={checkForNewTemplates}
+            disabled={newTemplateDiscovery.phase === 'checking'}
+          >
+            {newTemplateDiscovery.phase === 'checking' ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Checking...
+              </>
+            ) : (
+              <>
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Check sitemap
+              </>
+            )}
+          </Button>
+        </div>
+
+        {newTemplateDiscovery.phase === 'checked' && (
+          <div className="mt-4 space-y-4">
+            <div className="grid grid-cols-3 gap-3">
+              <div className="p-3 rounded-lg bg-slate-50 border">
+                <div className="text-xs text-gray-500">In sitemap</div>
+                <div className="text-xl font-bold text-gray-800">{newTemplateDiscovery.totalInSitemap}</div>
+              </div>
+              <div className="p-3 rounded-lg bg-slate-50 border">
+                <div className="text-xs text-gray-500">In gallery</div>
+                <div className="text-xl font-bold text-gray-800">{newTemplateDiscovery.existingInDb}</div>
+              </div>
+              <div className={`p-3 rounded-lg border ${newTemplateDiscovery.missingCount > 0 ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'}`}>
+                <div className="text-xs text-gray-500">Missing</div>
+                <div className={`text-xl font-bold ${newTemplateDiscovery.missingCount > 0 ? 'text-amber-700' : 'text-green-700'}`}>
+                  {newTemplateDiscovery.missingCount}
+                </div>
+              </div>
+            </div>
+
+            {newTemplateDiscovery.missingCount > 0 && (
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div className="text-sm text-gray-600">
+                  Showing {Math.min(10, newTemplateDiscovery.missingTemplates.length)} of {newTemplateDiscovery.missingCount} missing templates
+                </div>
+                <Button
+                  onClick={startMissingTemplateScrape}
+                  disabled={isExecuting}
+                  className="bg-blue-600 hover:bg-blue-700"
+                >
+                  <Play className="h-4 w-4 mr-2" />
+                  Scrape missing templates
+                </Button>
+              </div>
+            )}
+
+            {newTemplateDiscovery.missingTemplates.length > 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {newTemplateDiscovery.missingTemplates.slice(0, 10).map((t) => (
+                  <a
+                    key={t.url}
+                    href={t.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-2 rounded-lg border bg-white hover:bg-slate-50 text-sm text-gray-700 truncate"
+                    title={t.url}
+                  >
+                    {t.displayName}
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {newTemplateDiscovery.phase === 'error' && newTemplateDiscovery.error && (
+          <div className="mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+            {newTemplateDiscovery.error}
+          </div>
+        )}
+      </Card>
 
       {/* Delete Dialog */}
       {showDeleteDialog && (

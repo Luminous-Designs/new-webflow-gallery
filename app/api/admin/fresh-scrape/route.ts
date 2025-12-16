@@ -3,6 +3,7 @@ import { db } from '@/lib/db';
 import { promises as fs } from 'fs';
 import path from 'path';
 import axios from 'axios';
+import { clampFreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 
 // Types
 export interface FreshScrapeState {
@@ -80,6 +81,33 @@ async function getLatestFreshScrape(): Promise<FreshScrapeState | null> {
     `SELECT * FROM fresh_scrape_state ORDER BY created_at DESC LIMIT 1`
   );
   return state || null;
+}
+
+async function getLastScreenshotForScrape(stateId: number): Promise<{
+  template_name: string | null;
+  template_slug: string | null;
+  screenshot_thumbnail_path: string | null;
+  screenshot_path: string | null;
+  captured_at: string;
+} | null> {
+  const row = await db.getAsync<{
+    template_name: string | null;
+    template_slug: string | null;
+    screenshot_thumbnail_path: string | null;
+    captured_at: string;
+  }>(
+    `SELECT template_name, template_slug, screenshot_thumbnail_path, captured_at
+     FROM fresh_scrape_screenshots
+     WHERE fresh_scrape_id = ?
+     ORDER BY captured_at DESC
+     LIMIT 1`,
+    [stateId]
+  );
+  if (!row) return null;
+  return {
+    ...row,
+    screenshot_path: row.template_slug ? `/screenshots/${row.template_slug}.webp` : null
+  };
 }
 
 // Helper to fetch sitemap URLs
@@ -193,7 +221,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { action, config } = body;
+    const { action, config, urls } = body;
 
     switch (action) {
       case 'start': {
@@ -212,23 +240,27 @@ export async function POST(request: NextRequest) {
         );
         const featuredAuthorIds = featuredAuthors.map(a => a.author_id);
 
-        // Create initial config
+        // Create initial config (sanitized/clamped)
+        const baseConfig: FreshScrapeConfig = {
+          concurrency: 5,
+          browserInstances: 2,
+          pagesPerBrowser: 5,
+          batchSize: 10,
+          timeout: 45000,
+          screenshotAnimationWaitMs: 3000,
+          screenshotNudgeScrollRatio: 0.2,
+          screenshotNudgeWaitMs: 500,
+          screenshotNudgeAfterMs: 500,
+          screenshotStabilityStableMs: 1000,
+          screenshotStabilityMaxWaitMs: 7000,
+          screenshotStabilityCheckIntervalMs: 250,
+          screenshotJpegQuality: 80,
+          screenshotWebpQuality: 75,
+          thumbnailWebpQuality: 60
+        };
         const defaultConfig: FreshScrapeConfig = {
-          concurrency: config?.concurrency || 5,
-          browserInstances: config?.browserInstances || 2,
-          pagesPerBrowser: config?.pagesPerBrowser || 5,
-          batchSize: config?.batchSize || 10,
-          timeout: config?.timeout || 45000,
-          screenshotAnimationWaitMs: config?.screenshotAnimationWaitMs ?? 3000,
-          screenshotNudgeScrollRatio: config?.screenshotNudgeScrollRatio ?? 0.2,
-          screenshotNudgeWaitMs: config?.screenshotNudgeWaitMs ?? 500,
-          screenshotNudgeAfterMs: config?.screenshotNudgeAfterMs ?? 500,
-          screenshotStabilityStableMs: config?.screenshotStabilityStableMs ?? 1000,
-          screenshotStabilityMaxWaitMs: config?.screenshotStabilityMaxWaitMs ?? 7000,
-          screenshotStabilityCheckIntervalMs: config?.screenshotStabilityCheckIntervalMs ?? 250,
-          screenshotJpegQuality: config?.screenshotJpegQuality ?? 80,
-          screenshotWebpQuality: config?.screenshotWebpQuality ?? 75,
-          thumbnailWebpQuality: config?.thumbnailWebpQuality ?? 60
+          ...baseConfig,
+          ...(config ? (clampFreshScraperConfig(config) as Partial<FreshScrapeConfig>) : {})
         };
 
         // Create fresh scrape state
@@ -328,6 +360,125 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      case 'check_new': {
+        const active = await getActiveFreshScrape();
+        if (active) {
+          return NextResponse.json(
+            { error: 'A scrape is already in progress', state: active },
+            { status: 400 }
+          );
+        }
+
+        const sitemapUrls = await fetchSitemapUrls();
+
+        const existingSlugs = await db.allAsync<{ slug: string }>('SELECT slug FROM templates');
+        const existingSlugSet = new Set(existingSlugs.map(r => r.slug));
+
+        const missingTemplates = sitemapUrls
+          .map(url => {
+            const slug = url.split('/').filter(Boolean).pop() || '';
+            return { url, slug };
+          })
+          .filter(t => t.slug && !existingSlugSet.has(t.slug))
+          .map(t => {
+            const displayName = t.slug
+              .split('-')
+              .map(part => part ? (part[0].toUpperCase() + part.slice(1)) : part)
+              .join(' ');
+            return { ...t, displayName };
+          });
+
+        return NextResponse.json({
+          discovery: {
+            totalInSitemap: sitemapUrls.length,
+            existingInDb: existingSlugSet.size,
+            missingCount: missingTemplates.length,
+            missingTemplates: missingTemplates.slice(0, 200)
+          }
+        });
+      }
+
+      case 'start_update': {
+        const existing = await getActiveFreshScrape();
+        if (existing) {
+          return NextResponse.json(
+            { error: 'A scrape is already in progress', state: existing },
+            { status: 400 }
+          );
+        }
+
+        let urlsToScrape: string[] = [];
+        if (urls && Array.isArray(urls) && urls.length > 0) {
+          urlsToScrape = urls;
+        } else {
+          // Default behavior: compute missing templates from sitemap vs DB.
+          const sitemapUrls = await fetchSitemapUrls();
+          const existingSlugs = await db.allAsync<{ slug: string }>('SELECT slug FROM templates');
+          const existingSlugSet = new Set(existingSlugs.map(r => r.slug));
+          urlsToScrape = sitemapUrls.filter(url => {
+            const slug = url.split('/').filter(Boolean).pop() || '';
+            return slug && !existingSlugSet.has(slug);
+          });
+        }
+
+        if (urlsToScrape.length === 0) {
+          return NextResponse.json(
+            { error: 'No missing templates to scrape' },
+            { status: 400 }
+          );
+        }
+
+        const baseConfig: FreshScrapeConfig = {
+          concurrency: 5,
+          browserInstances: 2,
+          pagesPerBrowser: 5,
+          batchSize: 10,
+          timeout: 45000,
+          screenshotAnimationWaitMs: 3000,
+          screenshotNudgeScrollRatio: 0.2,
+          screenshotNudgeWaitMs: 500,
+          screenshotNudgeAfterMs: 500,
+          screenshotStabilityStableMs: 1000,
+          screenshotStabilityMaxWaitMs: 7000,
+          screenshotStabilityCheckIntervalMs: 250,
+          screenshotJpegQuality: 80,
+          screenshotWebpQuality: 75,
+          thumbnailWebpQuality: 60
+        };
+        const updateConfig: FreshScrapeConfig = {
+          ...baseConfig,
+          ...(config ? (clampFreshScraperConfig(config) as Partial<FreshScrapeConfig>) : {})
+        };
+
+        const sitemapCount = typeof body.totalSitemapCount === 'number' ? body.totalSitemapCount : 0;
+
+        const { lastID } = await db.runAsync(
+          `INSERT INTO fresh_scrape_state (
+            status, phase, total_sitemap_count,
+            regular_template_urls, regular_total,
+            config, started_at
+          ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+          [
+            'scraping_regular',
+            'regular_scrape',
+            sitemapCount,
+            JSON.stringify(urlsToScrape),
+            urlsToScrape.length,
+            JSON.stringify(updateConfig)
+          ]
+        );
+
+        const state = await db.getAsync<FreshScrapeState>(
+          'SELECT * FROM fresh_scrape_state WHERE id = ?',
+          [lastID]
+        );
+
+        return NextResponse.json({
+          message: 'Update scrape started',
+          state
+        });
+      }
+
       case 'update_config': {
         // Update config for active scrape (applies to next batch)
         const state = await getActiveFreshScrape();
@@ -360,7 +511,7 @@ export async function POST(request: NextRequest) {
 
         const newConfig: FreshScrapeConfig = {
           ...currentConfig,
-          ...config
+          ...(config ? (clampFreshScraperConfig(config) as Partial<FreshScrapeConfig>) : {})
         };
 
         await db.runAsync(
@@ -621,12 +772,19 @@ export async function GET(request: NextRequest) {
           `SELECT * FROM fresh_scrape_state WHERE status = 'paused' ORDER BY created_at DESC LIMIT 1`
         );
 
+        const [pausedLastScreenshot, activeLastScreenshot] = await Promise.all([
+          paused?.id ? getLastScreenshotForScrape(paused.id) : Promise.resolve(null),
+          active?.id ? getLastScreenshotForScrape(active.id) : Promise.resolve(null)
+        ]);
+
         return NextResponse.json({
           isActive: !!active,
           hasPausedScrape: !!paused,
           activeState: active,
           pausedState: paused,
-          latestState: latest
+          latestState: latest,
+          pausedLastScreenshot,
+          activeLastScreenshot
         });
       }
 
