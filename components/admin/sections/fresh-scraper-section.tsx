@@ -691,8 +691,10 @@ function ActiveTemplateCard({ template }: { template: TemplatePhase }) {
   );
 }
 
-// Screenshot Feed Component (lazy-loaded, full aspect ratio)
-function ScreenshotFeed({
+// Lazy Screenshot Carousel - Only renders WINDOW_SIZE items at a time for performance
+const CAROUSEL_WINDOW_SIZE = 20;
+
+function LazyScreenshotCarousel({
   screenshots,
   onLoadMore,
   hasMore,
@@ -704,8 +706,35 @@ function ScreenshotFeed({
   isLoading: boolean;
 }) {
   const feedRef = useRef<HTMLDivElement>(null);
-  const [activeIndex, setActiveIndex] = useState(0);
+  // windowStart is the index in the full screenshots array where our visible window begins
+  const [windowStart, setWindowStart] = useState(0);
+  // activeIndex is the currently focused item within the visible window
+  const [activeIndexInWindow, setActiveIndexInWindow] = useState(0);
 
+  // Calculate the visible window of screenshots
+  const windowEnd = Math.min(windowStart + CAROUSEL_WINDOW_SIZE, screenshots.length);
+  const visibleScreenshots = screenshots.slice(windowStart, windowEnd);
+
+  // Check if we can navigate to newer (earlier in array) or older (later in array) screenshots
+  const hasNewer = windowStart > 0;
+  const hasOlder = windowEnd < screenshots.length || hasMore;
+
+  // Reset window when screenshots change significantly (e.g., new scrape started)
+  useEffect(() => {
+    if (screenshots.length > 0 && windowStart >= screenshots.length) {
+      setWindowStart(0);
+      setActiveIndexInWindow(0);
+    }
+  }, [screenshots.length, windowStart]);
+
+  // Auto-scroll to show newest screenshots when they arrive (only if at window start)
+  useEffect(() => {
+    if (windowStart === 0 && activeIndexInWindow === 0 && feedRef.current) {
+      feedRef.current.scrollTo({ left: 0, behavior: 'smooth' });
+    }
+  }, [screenshots.length, windowStart, activeIndexInWindow]);
+
+  // Track scroll position within visible window
   useEffect(() => {
     const container = feedRef.current;
     if (!container) return;
@@ -724,23 +753,17 @@ function ScreenshotFeed({
             nearestIdx = i;
           }
         }
-        setActiveIndex(nearestIdx);
-      } else {
-        setActiveIndex(0);
-      }
-
-      const remaining = container.scrollWidth - container.scrollLeft - container.clientWidth;
-      if (hasMore && !isLoading && remaining < container.clientWidth * 0.6) {
-        onLoadMore();
+        setActiveIndexInWindow(nearestIdx);
       }
     };
 
     handleScroll();
     container.addEventListener('scroll', handleScroll, { passive: true });
     return () => container.removeEventListener('scroll', handleScroll);
-  }, [screenshots.length, hasMore, isLoading, onLoadMore]);
+  }, [visibleScreenshots.length]);
 
-  const scrollToIndex = (index: number) => {
+  // Scroll within current window
+  const scrollToIndexInWindow = (index: number) => {
     const container = feedRef.current;
     if (!container) return;
     const children = container.children as HTMLCollectionOf<HTMLElement>;
@@ -748,7 +771,45 @@ function ScreenshotFeed({
     const child = children[clamped];
     if (child) {
       container.scrollTo({ left: child.offsetLeft, behavior: 'smooth' });
-      setActiveIndex(clamped);
+      setActiveIndexInWindow(clamped);
+    }
+  };
+
+  // Load newer screenshots (move window towards start of array)
+  const loadNewer = () => {
+    const newStart = Math.max(0, windowStart - CAROUSEL_WINDOW_SIZE);
+    setWindowStart(newStart);
+    // Position at the end of the new window so user sees the transition point
+    setTimeout(() => {
+      if (feedRef.current) {
+        const children = feedRef.current.children as HTMLCollectionOf<HTMLElement>;
+        if (children.length > 0) {
+          const lastChild = children[children.length - 1];
+          feedRef.current.scrollTo({ left: lastChild.offsetLeft, behavior: 'auto' });
+          setActiveIndexInWindow(children.length - 1);
+        }
+      }
+    }, 50);
+  };
+
+  // Load older screenshots (move window towards end of array)
+  const loadOlder = () => {
+    // If we're at the edge and there's more data to fetch, trigger the fetch
+    if (windowEnd >= screenshots.length && hasMore && !isLoading) {
+      onLoadMore();
+    }
+
+    // Move window forward
+    const newStart = Math.min(screenshots.length - 1, windowStart + CAROUSEL_WINDOW_SIZE);
+    if (newStart < screenshots.length) {
+      setWindowStart(newStart);
+      // Position at the start of the new window
+      setTimeout(() => {
+        if (feedRef.current) {
+          feedRef.current.scrollTo({ left: 0, behavior: 'auto' });
+          setActiveIndexInWindow(0);
+        }
+      }, 50);
     }
   };
 
@@ -761,81 +822,149 @@ function ScreenshotFeed({
     );
   }
 
+  const globalActiveIndex = windowStart + activeIndexInWindow;
+
   return (
     <div className="relative">
-      {screenshots.length > 1 && (
-        <>
+      {/* Navigation Controls */}
+      <div className="flex items-center gap-2 mb-3">
+        {/* Load Newer Button */}
+        {hasNewer && (
           <Button
             type="button"
-            variant="ghost"
-            size="icon"
-            onClick={() => scrollToIndex(activeIndex - 1)}
-            className="absolute left-0 top-1/2 -translate-y-1/2 z-10 bg-white/80 hover:bg-white shadow-md rounded-full"
+            variant="outline"
+            size="sm"
+            onClick={loadNewer}
+            className="flex items-center gap-1 text-xs bg-blue-50 border-blue-200 hover:bg-blue-100 text-blue-700"
           >
-            <ChevronLeft className="h-5 w-5 text-gray-700" />
+            <ChevronLeft className="h-4 w-4" />
+            Newer ({windowStart} more)
           </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={() => scrollToIndex(activeIndex + 1)}
-            className="absolute right-0 top-1/2 -translate-y-1/2 z-10 bg-white/80 hover:bg-white shadow-md rounded-full"
-          >
-            <ChevronRight className="h-5 w-5 text-gray-700" />
-          </Button>
-        </>
-      )}
+        )}
 
-      <div
-        ref={feedRef}
-        className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide snap-x snap-mandatory scroll-smooth px-8"
-      >
-      {screenshots.map((screenshot) => (
-        <div
-          key={screenshot.id}
-          className="flex-shrink-0 w-64 group snap-start"
-        >
-          <div className="relative rounded-xl overflow-hidden shadow-lg hover:shadow-xl transition-shadow">
-            <div className="relative w-64 aspect-[16/10] bg-gray-100">
-              {screenshot.screenshotPath || screenshot.thumbnailPath ? (
-                <Image
-                  src={(screenshot.screenshotPath || screenshot.thumbnailPath)!}
-                  alt={screenshot.name || screenshot.slug || 'Screenshot'}
-                  fill
-                  className="object-contain object-top"
-                  unoptimized
-                />
-              ) : (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <ImageIcon className="h-8 w-8 text-gray-400" />
-                </div>
-              )}
-            </div>
-            {screenshot.isFeaturedAuthor && (
-              <div className="absolute top-2 right-2">
-                <Badge className="bg-amber-500 text-white text-[10px] px-1.5">
-                  <Star className="h-3 w-3 mr-0.5" />
-                  Featured
-                </Badge>
-              </div>
-            )}
-            <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2">
-              <p className="text-white text-xs font-medium truncate">
-                {screenshot.name || screenshot.slug}
-              </p>
-            </div>
-          </div>
+        <div className="flex-1" />
+
+        {/* Window indicator */}
+        <div className="text-xs text-gray-500 bg-gray-100 px-3 py-1 rounded-full">
+          Showing {windowStart + 1}-{windowEnd} of {screenshots.length}
+          {hasMore && '+'}
         </div>
-      ))}
+
+        <div className="flex-1" />
+
+        {/* Load Older Button */}
+        {hasOlder && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={loadOlder}
+            disabled={isLoading}
+            className="flex items-center gap-1 text-xs bg-purple-50 border-purple-200 hover:bg-purple-100 text-purple-700"
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading...
+              </>
+            ) : (
+              <>
+                Older ({screenshots.length - windowEnd}{hasMore ? '+' : ''} more)
+                <ChevronRight className="h-4 w-4" />
+              </>
+            )}
+          </Button>
+        )}
       </div>
 
-      <div className="mt-2 flex items-center justify-center text-xs text-gray-500">
-        {activeIndex + 1} / {screenshots.length}
+      {/* Carousel */}
+      <div className="relative">
+        {/* Arrow navigation within window */}
+        {visibleScreenshots.length > 1 && (
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() => scrollToIndexInWindow(activeIndexInWindow - 1)}
+              disabled={activeIndexInWindow === 0}
+              className="absolute left-0 top-1/2 -translate-y-1/2 z-10 bg-white/90 hover:bg-white shadow-md rounded-full disabled:opacity-30"
+            >
+              <ChevronLeft className="h-5 w-5 text-gray-700" />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() => scrollToIndexInWindow(activeIndexInWindow + 1)}
+              disabled={activeIndexInWindow >= visibleScreenshots.length - 1}
+              className="absolute right-0 top-1/2 -translate-y-1/2 z-10 bg-white/90 hover:bg-white shadow-md rounded-full disabled:opacity-30"
+            >
+              <ChevronRight className="h-5 w-5 text-gray-700" />
+            </Button>
+          </>
+        )}
+
+        <div
+          ref={feedRef}
+          className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide snap-x snap-mandatory scroll-smooth px-10"
+        >
+          {visibleScreenshots.map((screenshot) => (
+            <div
+              key={screenshot.id}
+              className="flex-shrink-0 w-64 group snap-start"
+            >
+              <div className="relative rounded-xl overflow-hidden shadow-lg hover:shadow-xl transition-shadow">
+                <div className="relative w-64 aspect-[16/10] bg-gray-100">
+                  {screenshot.screenshotPath || screenshot.thumbnailPath ? (
+                    <Image
+                      src={(screenshot.screenshotPath || screenshot.thumbnailPath)!}
+                      alt={screenshot.name || screenshot.slug || 'Screenshot'}
+                      fill
+                      className="object-contain object-top"
+                      unoptimized
+                    />
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <ImageIcon className="h-8 w-8 text-gray-400" />
+                    </div>
+                  )}
+                </div>
+                {screenshot.isFeaturedAuthor && (
+                  <div className="absolute top-2 right-2">
+                    <Badge className="bg-amber-500 text-white text-[10px] px-1.5">
+                      <Star className="h-3 w-3 mr-0.5" />
+                      Featured
+                    </Badge>
+                  </div>
+                )}
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2">
+                  <p className="text-white text-xs font-medium truncate">
+                    {screenshot.name || screenshot.slug}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
-      {isLoading && (
-        <div className="mt-2 text-center text-xs text-gray-400">Loading more...</div>
-      )}
+      {/* Position indicator */}
+      <div className="mt-2 flex items-center justify-center gap-2">
+        <div className="text-xs text-gray-500">
+          {globalActiveIndex + 1} / {screenshots.length}
+        </div>
+        {/* Mini progress bar showing window position */}
+        <div className="w-32 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-300"
+            style={{
+              width: `${(CAROUSEL_WINDOW_SIZE / screenshots.length) * 100}%`,
+              marginLeft: `${(windowStart / screenshots.length) * 100}%`
+            }}
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -1955,7 +2084,7 @@ export function FreshScraperSection() {
               {screenshots.length} captured
             </Badge>
           </div>
-          <ScreenshotFeed
+          <LazyScreenshotCarousel
             screenshots={screenshots}
             onLoadMore={loadMoreScreenshots}
             hasMore={screenshotsHasMore}
