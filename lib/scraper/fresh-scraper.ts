@@ -1290,6 +1290,19 @@ export class FreshScraper extends EventEmitter {
     };
   }
 
+  private async isLikelyBlankScreenshot(buffer: Buffer): Promise<boolean> {
+    try {
+      const stats = await sharp(buffer).stats();
+      const channels = stats.channels.slice(0, 3);
+      if (channels.length === 0) return false;
+      const avgMean = channels.reduce((sum, c) => sum + c.mean, 0) / channels.length;
+      const avgStdev = channels.reduce((sum, c) => sum + c.stdev, 0) / channels.length;
+      return avgStdev < 1.5 && (avgMean > 250 || avgMean < 5);
+    } catch {
+      return false;
+    }
+  }
+
   private async scrapeTemplateInBrowser(
     page: Page,
     url: string,
@@ -1447,15 +1460,37 @@ export class FreshScraper extends EventEmitter {
           stabilityCheckIntervalMs: this.config.screenshotStabilityCheckIntervalMs
         });
 
-        screenshotBuffer = await page.screenshot({
-          type: 'jpeg',
-          quality: Math.min(100, Math.max(1, this.config.screenshotJpegQuality)),
-          fullPage: false
-        });
-      } catch (screenshotError) {
-        const errorMsg = screenshotError instanceof Error ? screenshotError.message : 'Unknown error';
-        this.log('warn', `Screenshot failed for ${slug}: ${errorMsg}`);
-        if (errorMsg.includes('Timeout') || errorMsg.includes('timeout')) {
+	        screenshotBuffer = await page.screenshot({
+	          type: 'jpeg',
+	          quality: Math.min(100, Math.max(1, this.config.screenshotJpegQuality)),
+	          fullPage: false
+	        });
+
+	        if (screenshotBuffer && screenshotBuffer.length < 25_000 && await this.isLikelyBlankScreenshot(screenshotBuffer)) {
+	          this.log('warn', `Screenshot looked blank for ${slug}, retrying once...`);
+	          try {
+	            await page.waitForTimeout(1500);
+	            const retry = await page.screenshot({
+	              type: 'jpeg',
+	              quality: Math.min(100, Math.max(1, this.config.screenshotJpegQuality)),
+	              fullPage: false
+	            });
+	            if (!await this.isLikelyBlankScreenshot(retry)) {
+	              screenshotBuffer = retry;
+	            } else {
+	              screenshotBuffer = null;
+	              this.log('warn', `Screenshot still blank for ${slug}, skipping screenshot for this template`);
+	            }
+	          } catch (retryError) {
+	            const retryMsg = retryError instanceof Error ? retryError.message : 'Unknown error';
+	            this.log('warn', `Screenshot retry failed for ${slug}: ${retryMsg}`);
+	            screenshotBuffer = null;
+	          }
+	        }
+	      } catch (screenshotError) {
+	        const errorMsg = screenshotError instanceof Error ? screenshotError.message : 'Unknown error';
+	        this.log('warn', `Screenshot failed for ${slug}: ${errorMsg}`);
+	        if (errorMsg.includes('Timeout') || errorMsg.includes('timeout')) {
           throw screenshotError;
         }
       }

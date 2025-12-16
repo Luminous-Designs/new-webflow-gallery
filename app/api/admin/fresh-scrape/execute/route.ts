@@ -2,6 +2,31 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { FreshScraper, FreshScraperConfig, ScrapeState, clampFreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 
+function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function readJsonBody(
+  request: NextRequest
+): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; error: string }> {
+  try {
+    const text = await request.text();
+    if (!text.trim()) return { ok: true, body: {} };
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { ok: true, body: parsed as Record<string, unknown> };
+    }
+    return { ok: true, body: {} };
+  } catch {
+    return { ok: false, error: 'Invalid JSON body' };
+  }
+}
+
 // Store the active scraper instance
 let activeScraper: FreshScraper | null = null;
 let currentStateId: number | null = null;
@@ -83,12 +108,20 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json();
-    const { action, stateId, batchUrls, isFeatured, config } = body;
+    const parsed = await readJsonBody(request);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: 400 });
+    }
+    const body = parsed.body;
+    const action = typeof body.action === 'string' ? body.action : undefined;
+    const stateId = typeof body.stateId === 'number' ? body.stateId : Number(body.stateId);
+    const batchUrls = Array.isArray(body.batchUrls) ? (body.batchUrls as unknown[]).filter((u): u is string => typeof u === 'string') : undefined;
+    const isFeatured = typeof body.isFeatured === 'boolean' ? body.isFeatured : false;
+    const config = body.config as Partial<FreshScraperConfig> | undefined;
 
     switch (action) {
       case 'start_batch': {
-        if (!stateId || !batchUrls || !Array.isArray(batchUrls)) {
+        if (!Number.isFinite(stateId) || !batchUrls) {
           return NextResponse.json({ error: 'stateId and batchUrls required' }, { status: 400 });
         }
 
@@ -103,7 +136,7 @@ export async function POST(request: NextRequest) {
           [stateId]
         );
 
-        const baseDefaults: FreshScraperConfig = {
+	        const baseDefaults: FreshScraperConfig = {
           concurrency: 5,
           browserInstances: 2,
           pagesPerBrowser: 5,
@@ -121,11 +154,15 @@ export async function POST(request: NextRequest) {
           thumbnailWebpQuality: 60
         };
 
-        const rawConfig = state?.config ? JSON.parse(state.config) : (config || {});
-        const scraperConfig: FreshScraperConfig = {
-          ...baseDefaults,
-          ...(clampFreshScraperConfig(rawConfig) as Partial<FreshScraperConfig>)
-        };
+	        const persistedConfig = safeJsonParse(state?.config, {});
+	        const rawConfig = {
+	          ...persistedConfig,
+	          ...(config || {})
+	        };
+	        const scraperConfig: FreshScraperConfig = {
+	          ...baseDefaults,
+	          ...(clampFreshScraperConfig(rawConfig) as Partial<FreshScraperConfig>)
+	        };
 
         // Reset events
         scraperEvents.logs = [];
@@ -151,13 +188,18 @@ export async function POST(request: NextRequest) {
           }
         });
 
-        activeScraper.on('template-complete', (data) => {
-          const idx = scraperEvents.currentBatch.findIndex(t => t.url === data.url);
-          if (idx >= 0) {
-            scraperEvents.currentBatch[idx].phase = data.success ? 'completed' : 'failed';
-            scraperEvents.currentBatch[idx].name = data.name;
-          }
-        });
+	        activeScraper.on('template-complete', (data) => {
+	          const idx = scraperEvents.currentBatch.findIndex(t => t.url === data.url);
+	          if (idx >= 0) {
+	            scraperEvents.currentBatch[idx].phase = data.success ? 'completed' : 'failed';
+	            scraperEvents.currentBatch[idx].name = data.name;
+	          }
+	          const prev = scraperEvents.progress || { processed: 0, successful: 0, failed: 0, total: batchUrls.length };
+	          const processed = Math.min(prev.total, (prev.processed || 0) + 1);
+	          const successful = (prev.successful || 0) + (data.success ? 1 : 0);
+	          const failed = (prev.failed || 0) + (data.success ? 0 : 1);
+	          scraperEvents.progress = { ...prev, processed, successful, failed };
+	        });
 
         activeScraper.on('screenshot-captured', async (data) => {
           scraperEvents.recentScreenshots.unshift({

@@ -97,6 +97,13 @@ interface TemplatePhase {
   elapsed: number;
 }
 
+interface ExecutorProgress {
+  processed: number;
+  successful: number;
+  failed: number;
+  total: number;
+}
+
 interface Screenshot {
   id: number;
   name: string | null;
@@ -218,6 +225,25 @@ function formatTime(seconds: number): string {
   const hours = Math.floor(mins / 60);
   const remainingMins = mins % 60;
   return `${hours}h ${remainingMins}m`;
+}
+
+function applyInFlightProgress(state: FreshScrapeState, inFlight: ExecutorProgress | null, isRunning: boolean): FreshScrapeState {
+  if (!isRunning || !inFlight) return state;
+  const isFeatured = state.status === 'scraping_featured' || state.phase === 'featured_scrape';
+  if (isFeatured) {
+    return {
+      ...state,
+      featured_processed: (state.featured_processed || 0) + (inFlight.processed || 0),
+      featured_successful: (state.featured_successful || 0) + (inFlight.successful || 0),
+      featured_failed: (state.featured_failed || 0) + (inFlight.failed || 0)
+    };
+  }
+  return {
+    ...state,
+    regular_processed: (state.regular_processed || 0) + (inFlight.processed || 0),
+    regular_successful: (state.regular_successful || 0) + (inFlight.successful || 0),
+    regular_failed: (state.regular_failed || 0) + (inFlight.failed || 0)
+  };
 }
 
 // Delete Confirmation Dialog
@@ -1394,6 +1420,7 @@ export function FreshScraperSection() {
   const [isExecuting, setIsExecuting] = useState(false);
   const [realTimeState, setRealTimeState] = useState<RealTimeState | null>(null);
   const [executorIsRunning, setExecutorIsRunning] = useState(false);
+  const [executorProgress, setExecutorProgress] = useState<ExecutorProgress | null>(null);
   const [newTemplateDiscovery, setNewTemplateDiscovery] = useState<NewTemplateDiscoveryState>({
     phase: 'idle',
     totalInSitemap: 0,
@@ -1409,8 +1436,21 @@ export function FreshScraperSection() {
   const lastProcessedRef = useRef<{ count: number; time: number } | null>(null);
   const speedSampleRef = useRef<number[]>([]);
   const screenshotsLoadingRef = useRef(false);
+  const scrapeStateRef = useRef<FreshScrapeState | null>(null);
+  const executorIsRunningRef = useRef(false);
+  const executorProgressRef = useRef<ExecutorProgress | null>(null);
 
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const pollInFlightRef = useRef(false);
+  useEffect(() => {
+    scrapeStateRef.current = scrapeState;
+  }, [scrapeState]);
+  useEffect(() => {
+    executorIsRunningRef.current = executorIsRunning;
+  }, [executorIsRunning]);
+  useEffect(() => {
+    executorProgressRef.current = executorProgress;
+  }, [executorProgress]);
 
   // Fetch initial state
   useEffect(() => {
@@ -1421,13 +1461,17 @@ export function FreshScraperSection() {
         });
         if (response.ok) {
           const data = await response.json();
-          if (data.activeState) {
-	            setScrapeState(data.activeState);
-	            if (data.activeState.config) {
-	              const parsed = JSON.parse(data.activeState.config) as Partial<FreshScrapeConfig>;
-	              setConfig(prev => ({ ...prev, ...parsed }));
-	            }
-	          }
+	          if (data.activeState) {
+		            setScrapeState(data.activeState);
+		            if (data.activeState.config) {
+		              try {
+		                const parsed = JSON.parse(data.activeState.config) as Partial<FreshScrapeConfig>;
+		                setConfig(prev => ({ ...prev, ...parsed }));
+		              } catch {
+		                // Ignore invalid config JSON
+		              }
+		            }
+		          }
           if (data.pausedState) {
             setPausedState(data.pausedState);
           }
@@ -1506,90 +1550,104 @@ export function FreshScraperSection() {
     loadScreenshotsPage(0, false);
   }, [scrapeStateId, loadScreenshotsPage]);
 
-  useEffect(() => {
-    if (!scrapeStateId || !scrapeStateStatus || ['completed', 'failed', 'idle'].includes(scrapeStateStatus)) {
-      // Reset speed tracking when scrape is not active
-      lastProcessedRef.current = null;
-      speedSampleRef.current = [];
-      return;
-    }
+	  useEffect(() => {
+	    if (!scrapeStateId || !scrapeStateStatus || ['completed', 'failed', 'idle'].includes(scrapeStateStatus)) {
+	      // Reset speed tracking when scrape is not active
+	      lastProcessedRef.current = null;
+	      speedSampleRef.current = [];
+	      return;
+	    }
 
-    const poll = async () => {
-      try {
-        // Fetch state progress
-        const progressResponse = await fetch(
-          `/api/admin/fresh-scrape?action=progress&stateId=${scrapeStateId}`,
-          { headers: { 'Authorization': `Bearer ${resolveAuthToken()}` } }
-        );
+	    const poll = async () => {
+	      try {
+	        if (pollInFlightRef.current) return;
+	        pollInFlightRef.current = true;
+	        const fetchWithTimeout = async (url: string, options: RequestInit, timeoutMs: number) => {
+	          const controller = new AbortController();
+	          const id = setTimeout(() => controller.abort(), timeoutMs);
+	          try {
+	            return await fetch(url, { ...options, signal: controller.signal });
+	          } finally {
+	            clearTimeout(id);
+	          }
+	        };
 
-        if (progressResponse.ok) {
-          const data = await progressResponse.json();
-          setScrapeState(data.state);
-          setEstimatedSeconds(data.estimatedSecondsRemaining || 0);
+	        const headers = { 'Authorization': `Bearer ${resolveAuthToken()}` };
+	        const progressUrl = `/api/admin/fresh-scrape?action=progress&stateId=${scrapeStateId}`;
+	        const eventsUrl = '/api/admin/fresh-scrape/execute?action=events';
 
-          // Calculate speed (templates per minute)
-          if (data.state) {
-            const currentProcessed = (data.state.featured_processed || 0) + (data.state.regular_processed || 0);
-            const now = Date.now();
+	        let nextBaseState: FreshScrapeState | null = null;
+	        let nextExecutorIsRunning = executorIsRunningRef.current;
+	        let nextExecutorProgress = executorProgressRef.current;
 
-            if (lastProcessedRef.current) {
-              const timeDiffMinutes = (now - lastProcessedRef.current.time) / 60000; // Convert to minutes
-              const processedDiff = currentProcessed - lastProcessedRef.current.count;
+	        const [progressResult, eventsResult] = await Promise.allSettled([
+	          fetchWithTimeout(progressUrl, { headers }, 8000),
+	          fetchWithTimeout(eventsUrl, { headers }, 8000)
+	        ]);
 
-              if (timeDiffMinutes > 0 && processedDiff >= 0) {
-                const instantSpeed = processedDiff / timeDiffMinutes;
+	        if (progressResult.status === 'fulfilled' && progressResult.value.ok) {
+	          const data = await progressResult.value.json();
+	          if (data?.state) {
+	            nextBaseState = data.state as FreshScrapeState;
+	            setScrapeState(nextBaseState);
+	            setEstimatedSeconds(data.estimatedSecondsRemaining || 0);
+	          }
+	        }
 
-                // Add to samples (keep last 10 samples for smoothing)
-                speedSampleRef.current.push(instantSpeed);
-                if (speedSampleRef.current.length > 10) {
-                  speedSampleRef.current.shift();
-                }
+	        if (eventsResult.status === 'fulfilled' && eventsResult.value.ok) {
+	          const events = await eventsResult.value.json();
+	          nextExecutorIsRunning = !!events.isRunning;
+	          nextExecutorProgress = (events.progress || null) as ExecutorProgress | null;
+	          setExecutorIsRunning(nextExecutorIsRunning);
+	          setExecutorProgress(nextExecutorProgress);
+	          setCurrentBatch(events.currentBatch || []);
+	          setLogs(events.logs || []);
+	          if (events.realTimeState) {
+	            setRealTimeState(events.realTimeState);
+	          }
+	        }
 
-                // Calculate smoothed current speed (average of recent samples)
-                const smoothedSpeed = speedSampleRef.current.reduce((a, b) => a + b, 0) / speedSampleRef.current.length;
-                setCurrentSpeed(smoothedSpeed);
+	        // Calculate speed using persisted + in-flight progress (keeps chart live within a batch).
+	        const baseState = nextBaseState ?? scrapeStateRef.current;
+	        const inFlight = nextExecutorIsRunning ? nextExecutorProgress : null;
+	        if (baseState) {
+	          const displayState = applyInFlightProgress(baseState, inFlight, nextExecutorIsRunning);
+	          const currentProcessed = (displayState.featured_processed || 0) + (displayState.regular_processed || 0);
+	          const now = Date.now();
 
-                // Add to history every 30 seconds (15 poll cycles at 2s interval)
-                // This gives us a rolling history for the graph
-                if (speedSampleRef.current.length % 5 === 0) {
-                  setSpeedHistory(prev => {
-                    const newHistory = [...prev, smoothedSpeed];
-                    // Keep last 30 data points (about 2.5 minutes of history)
-                    return newHistory.slice(-30);
-                  });
-                }
-              }
-            }
+	          if (lastProcessedRef.current) {
+	            const timeDiffMinutes = (now - lastProcessedRef.current.time) / 60000;
+	            const processedDiff = currentProcessed - lastProcessedRef.current.count;
 
-            lastProcessedRef.current = { count: currentProcessed, time: now };
-          }
-        }
+	            if (timeDiffMinutes > 0 && processedDiff >= 0) {
+	              const instantSpeed = processedDiff / timeDiffMinutes;
+	              speedSampleRef.current.push(instantSpeed);
+	              if (speedSampleRef.current.length > 10) {
+	                speedSampleRef.current.shift();
+	              }
 
-        // Fetch execution events (includes realTimeState)
-        const eventsResponse = await fetch(
-          '/api/admin/fresh-scrape/execute?action=events',
-          { headers: { 'Authorization': `Bearer ${resolveAuthToken()}` } }
-        );
+	              const smoothedSpeed = speedSampleRef.current.reduce((a, b) => a + b, 0) / speedSampleRef.current.length;
+	              setCurrentSpeed(smoothedSpeed);
 
-        if (eventsResponse.ok) {
-          const events = await eventsResponse.json();
-          setExecutorIsRunning(!!events.isRunning);
-          setCurrentBatch(events.currentBatch || []);
-          setLogs(events.logs || []);
-          // Update real-time state from actual scraper
-          if (events.realTimeState) {
-            setRealTimeState(events.realTimeState);
-          }
-        }
+	              if (speedSampleRef.current.length % 5 === 0) {
+	                setSpeedHistory(prev => [...prev, smoothedSpeed].slice(-30));
+	              }
+	            }
+	          }
 
-        // Refresh latest screenshots page for live feed
-        if (scrapeStateId) {
-          loadScreenshotsPage(0, false);
-        }
-      } catch (error) {
-        console.error('Polling error:', error);
-      }
-    };
+	          lastProcessedRef.current = { count: currentProcessed, time: now };
+	        }
+
+	        // Refresh latest screenshots page for live feed
+	        if (scrapeStateId) {
+	          loadScreenshotsPage(0, false);
+	        }
+	      } catch (error) {
+	        console.error('Polling error:', error);
+	      } finally {
+	        pollInFlightRef.current = false;
+	      }
+	    };
 
     poll();
     pollingRef.current = setInterval(poll, 2000);
@@ -1763,13 +1821,18 @@ export function FreshScraperSection() {
   };
 
   // Execute batches
-  const executeBatches = async (state: FreshScrapeState) => {
-    setIsExecuting(true);
+	  const executeBatches = async (state: FreshScrapeState) => {
+	    setIsExecuting(true);
 
-    try {
-      const urls: string[] = state.regular_template_urls
-        ? JSON.parse(state.regular_template_urls)
-        : [];
+	    try {
+	      let urls: string[] = [];
+	      if (state.regular_template_urls) {
+	        try {
+	          urls = JSON.parse(state.regular_template_urls) as string[];
+	        } catch {
+	          urls = [];
+	        }
+	      }
 
       if (urls.length === 0) {
         toast.info('No templates to scrape');
@@ -2128,15 +2191,16 @@ export function FreshScraperSection() {
     );
   }
 
-  // Active scrape - Control Center View
-  if (scrapeState && !['completed', 'failed', 'idle'].includes(scrapeState.status) && scrapeState.phase !== 'none') {
-    const totalProcessed = (scrapeState.featured_processed || 0) + (scrapeState.regular_processed || 0);
-    const totalCount = (scrapeState.featured_total || 0) + (scrapeState.regular_total || 0);
-    const isScrapePhase = scrapeState.status === 'scraping_featured' || scrapeState.status === 'scraping_regular';
-    const isActuallyRunning = executorIsRunning && !!realTimeState && !realTimeState.isPaused && !realTimeState.isStopped && !realTimeState.isTimeoutPaused;
-    const isReadyToBegin = isScrapePhase && totalProcessed === 0 && !isActuallyRunning && scrapeState.status !== 'paused';
-    const hasRemainingWork = totalCount > totalProcessed;
-    const isInterrupted = isScrapePhase && hasRemainingWork && !executorIsRunning && scrapeState.status !== 'paused' && !isExecuting;
+	  // Active scrape - Control Center View
+	  if (scrapeState && !['completed', 'failed', 'idle'].includes(scrapeState.status) && scrapeState.phase !== 'none') {
+	    const displayScrapeState = applyInFlightProgress(scrapeState, executorProgress, executorIsRunning);
+	    const totalProcessed = (displayScrapeState.featured_processed || 0) + (displayScrapeState.regular_processed || 0);
+	    const totalCount = (displayScrapeState.featured_total || 0) + (displayScrapeState.regular_total || 0);
+	    const isScrapePhase = scrapeState.status === 'scraping_featured' || scrapeState.status === 'scraping_regular';
+	    const isActuallyRunning = executorIsRunning && !!realTimeState && !realTimeState.isPaused && !realTimeState.isStopped && !realTimeState.isTimeoutPaused;
+	    const isReadyToBegin = isScrapePhase && totalProcessed === 0 && !isActuallyRunning && scrapeState.status !== 'paused';
+	    const hasRemainingWork = totalCount > totalProcessed;
+	    const isInterrupted = isScrapePhase && hasRemainingWork && !executorIsRunning && scrapeState.status !== 'paused' && !isExecuting;
 
     return (
       <div className="space-y-6">
@@ -2201,8 +2265,8 @@ export function FreshScraperSection() {
           </div>
         </div>
 
-        {/* Progress Stats */}
-        <ProgressStats state={scrapeState} estimatedSeconds={estimatedSeconds} />
+	        {/* Progress Stats */}
+	        <ProgressStats state={displayScrapeState} estimatedSeconds={estimatedSeconds} />
 
         {/* Speed Indicator */}
         <SpeedIndicator

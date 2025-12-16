@@ -5,6 +5,31 @@ import path from 'path';
 import axios from 'axios';
 import { clampFreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 
+function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function readJsonBody(
+  request: NextRequest
+): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; error: string }> {
+  try {
+    const text = await request.text();
+    if (!text.trim()) return { ok: true, body: {} };
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { ok: true, body: parsed as Record<string, unknown> };
+    }
+    return { ok: true, body: {} };
+  } catch {
+    return { ok: false, error: 'Invalid JSON body' };
+  }
+}
+
 // Types
 export interface FreshScrapeState {
   id: number;
@@ -220,8 +245,14 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json();
-    const { action, config, urls } = body;
+    const parsed = await readJsonBody(request);
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: 400 });
+    }
+    const body = parsed.body;
+    const action = typeof body.action === 'string' ? body.action : undefined;
+    const config = body.config as Partial<FreshScrapeConfig> | undefined;
+    const urls = body.urls as string[] | undefined;
 
     switch (action) {
       case 'start': {
@@ -327,9 +358,7 @@ export async function POST(request: NextRequest) {
         const allUrls = await fetchSitemapUrls();
 
         // Get featured author IDs
-        const featuredAuthorIds: string[] = state.featured_author_ids
-          ? JSON.parse(state.featured_author_ids)
-          : [];
+        const featuredAuthorIds: string[] = safeJsonParse(state.featured_author_ids, []);
 
         // We need to categorize URLs - but we don't know which templates belong to featured authors
         // until we scrape them. So we'll just set all URLs and handle prioritization during scraping.
@@ -490,7 +519,23 @@ export async function POST(request: NextRequest) {
         }
 
         const currentConfig: FreshScrapeConfig = state.config
-          ? JSON.parse(state.config)
+          ? safeJsonParse(state.config, {
+            concurrency: 5,
+            browserInstances: 2,
+            pagesPerBrowser: 5,
+            batchSize: 10,
+            timeout: 45000,
+            screenshotAnimationWaitMs: 3000,
+            screenshotNudgeScrollRatio: 0.2,
+            screenshotNudgeWaitMs: 500,
+            screenshotNudgeAfterMs: 500,
+            screenshotStabilityStableMs: 1000,
+            screenshotStabilityMaxWaitMs: 7000,
+            screenshotStabilityCheckIntervalMs: 250,
+            screenshotJpegQuality: 80,
+            screenshotWebpQuality: 75,
+            thumbnailWebpQuality: 60
+          })
           : {
             concurrency: 5,
             browserInstances: 2,
@@ -611,7 +656,18 @@ export async function POST(request: NextRequest) {
 
       case 'update_progress': {
         // Called by scraper to update progress
-        const { stateId, isFeatured, processed, successful, failed, batchIndex, currentBatchUrls } = body;
+        const stateId = typeof body.stateId === 'number' ? body.stateId : Number(body.stateId);
+        if (!Number.isFinite(stateId)) {
+          return NextResponse.json({ error: 'stateId required' }, { status: 400 });
+        }
+        const isFeatured = body.isFeatured === true;
+        const processed = typeof body.processed === 'number' ? body.processed : undefined;
+        const successful = typeof body.successful === 'number' ? body.successful : undefined;
+        const failed = typeof body.failed === 'number' ? body.failed : undefined;
+        const batchIndex = typeof body.batchIndex === 'number' ? body.batchIndex : undefined;
+        const currentBatchUrls = Array.isArray(body.currentBatchUrls)
+          ? (body.currentBatchUrls as unknown[]).filter((u): u is string => typeof u === 'string')
+          : undefined;
 
         const state = await db.getAsync<FreshScrapeState>(
           'SELECT * FROM fresh_scrape_state WHERE id = ?',
@@ -675,7 +731,10 @@ export async function POST(request: NextRequest) {
 
       case 'complete_featured': {
         // Mark featured scraping as complete, move to regular
-        const { stateId } = body;
+        const stateId = typeof body.stateId === 'number' ? body.stateId : Number(body.stateId);
+        if (!Number.isFinite(stateId)) {
+          return NextResponse.json({ error: 'stateId required' }, { status: 400 });
+        }
 
         await db.runAsync(
           `UPDATE fresh_scrape_state SET
@@ -693,7 +752,10 @@ export async function POST(request: NextRequest) {
 
       case 'complete': {
         // Mark entire scrape as complete
-        const { stateId } = body;
+        const stateId = typeof body.stateId === 'number' ? body.stateId : Number(body.stateId);
+        if (!Number.isFinite(stateId)) {
+          return NextResponse.json({ error: 'stateId required' }, { status: 400 });
+        }
 
         await db.runAsync(
           `UPDATE fresh_scrape_state SET
@@ -710,7 +772,14 @@ export async function POST(request: NextRequest) {
 
       case 'add_screenshot': {
         // Add screenshot to feed
-        const { stateId, templateName, templateSlug, thumbnailPath, isFeaturedAuthor } = body;
+        const stateId = typeof body.stateId === 'number' ? body.stateId : Number(body.stateId);
+        if (!Number.isFinite(stateId)) {
+          return NextResponse.json({ error: 'stateId required' }, { status: 400 });
+        }
+        const templateName = typeof body.templateName === 'string' ? body.templateName : null;
+        const templateSlug = typeof body.templateSlug === 'string' ? body.templateSlug : null;
+        const thumbnailPath = typeof body.thumbnailPath === 'string' ? body.thumbnailPath : null;
+        const isFeaturedAuthor = body.isFeaturedAuthor === true;
 
         await db.runAsync(
           `INSERT INTO fresh_scrape_screenshots
@@ -724,7 +793,11 @@ export async function POST(request: NextRequest) {
 
       case 'record_error': {
         // Record an error
-        const { stateId, error } = body;
+        const stateId = typeof body.stateId === 'number' ? body.stateId : Number(body.stateId);
+        if (!Number.isFinite(stateId)) {
+          return NextResponse.json({ error: 'stateId required' }, { status: 400 });
+        }
+        const error = typeof body.error === 'string' ? body.error : 'Unknown error';
 
         await db.runAsync(
           `UPDATE fresh_scrape_state SET
