@@ -11,6 +11,7 @@ import {
   clearPlatformCache,
   PlatformInfo
 } from '@/lib/sync/platform';
+import { db } from '@/lib/db';
 
 // Force dynamic rendering
 export const dynamic = 'force-dynamic';
@@ -209,6 +210,239 @@ async function getDiscrepancies(
     vpsOnly,
     total: { localOnly: localOnly.length, vpsOnly: vpsOnly.length }
   };
+}
+
+/**
+ * Get all valid image filenames from the SQLite database
+ * These are the "source of truth" - any image on VPS not in this list is excess
+ */
+async function getValidFilenamesFromDatabase(): Promise<{
+  screenshots: Set<string>;
+  thumbnails: Set<string>;
+}> {
+  const templates = await db.allAsync<{ slug: string }>(
+    'SELECT slug FROM templates WHERE slug IS NOT NULL'
+  );
+
+  const screenshots = new Set<string>();
+  const thumbnails = new Set<string>();
+
+  for (const template of templates) {
+    if (template.slug) {
+      // Screenshot filename: {slug}.webp
+      screenshots.add(`${template.slug}.webp`);
+      // Thumbnail filename: {slug}_thumb.webp
+      thumbnails.add(`${template.slug}_thumb.webp`);
+    }
+  }
+
+  return { screenshots, thumbnails };
+}
+
+interface ExcessFile {
+  filename: string;
+  type: 'screenshot' | 'thumbnail';
+  path: string;
+}
+
+interface ExcessAnalysis {
+  excessFiles: ExcessFile[];
+  totalExcessCount: number;
+  excessScreenshots: number;
+  excessThumbnails: number;
+  validInDb: { screenshots: number; thumbnails: number };
+  totalOnVps: { screenshots: number; thumbnails: number };
+  estimatedSizeBytes: number;
+}
+
+/**
+ * Analyze VPS for excess files not linked to any template in SQLite
+ * SQLite database is the source of truth
+ */
+async function analyzeExcessVpsFiles(
+  config: typeof DEFAULT_VPS_CONFIG,
+  platform: PlatformInfo
+): Promise<ExcessAnalysis> {
+  // Get valid filenames from database (source of truth)
+  const validFiles = await getValidFilenamesFromDatabase();
+
+  // Get all files from VPS
+  const vpsScreenshots = await getVpsFiles(config, 'screenshots', platform);
+  const vpsThumbnails = await getVpsFiles(config, 'thumbnails', platform);
+
+  const excessFiles: ExcessFile[] = [];
+
+  // Find screenshots on VPS that are NOT in the database
+  for (const filename of vpsScreenshots) {
+    if (!validFiles.screenshots.has(filename)) {
+      excessFiles.push({
+        filename,
+        type: 'screenshot',
+        path: `${config.remotePath}/screenshots/${filename}`
+      });
+    }
+  }
+
+  // Find thumbnails on VPS that are NOT in the database
+  for (const filename of vpsThumbnails) {
+    if (!validFiles.thumbnails.has(filename)) {
+      excessFiles.push({
+        filename,
+        type: 'thumbnail',
+        path: `${config.remotePath}/thumbnails/${filename}`
+      });
+    }
+  }
+
+  const excessScreenshots = excessFiles.filter(f => f.type === 'screenshot').length;
+  const excessThumbnails = excessFiles.filter(f => f.type === 'thumbnail').length;
+
+  // Estimate size (rough estimate: ~100KB per screenshot, ~20KB per thumbnail)
+  const estimatedSizeBytes = (excessScreenshots * 100000) + (excessThumbnails * 20000);
+
+  return {
+    excessFiles,
+    totalExcessCount: excessFiles.length,
+    excessScreenshots,
+    excessThumbnails,
+    validInDb: {
+      screenshots: validFiles.screenshots.size,
+      thumbnails: validFiles.thumbnails.size
+    },
+    totalOnVps: {
+      screenshots: vpsScreenshots.size,
+      thumbnails: vpsThumbnails.size
+    },
+    estimatedSizeBytes
+  };
+}
+
+interface DeleteProgress {
+  status: 'running' | 'completed' | 'error';
+  totalFiles: number;
+  deletedFiles: number;
+  failedFiles: number;
+  currentFile: string;
+  logs: Array<{ timestamp: string; message: string; type: 'info' | 'success' | 'error' }>;
+  startedAt: string;
+  completedAt?: string;
+  error?: string;
+}
+
+// Store delete operation progress
+let deleteProgress: DeleteProgress | null = null;
+
+/**
+ * Delete excess files from VPS that are not in the SQLite database
+ */
+async function deleteExcessVpsFiles(
+  config: typeof DEFAULT_VPS_CONFIG,
+  platform: PlatformInfo,
+  filesToDelete: ExcessFile[]
+): Promise<void> {
+  deleteProgress = {
+    status: 'running',
+    totalFiles: filesToDelete.length,
+    deletedFiles: 0,
+    failedFiles: 0,
+    currentFile: '',
+    logs: [
+      { timestamp: new Date().toISOString(), message: `Starting deletion of ${filesToDelete.length} excess files...`, type: 'info' }
+    ],
+    startedAt: new Date().toISOString()
+  };
+
+  // Group files by type for batch deletion
+  const screenshotFiles = filesToDelete.filter(f => f.type === 'screenshot').map(f => f.filename);
+  const thumbnailFiles = filesToDelete.filter(f => f.type === 'thumbnail').map(f => f.filename);
+
+  try {
+    // Delete screenshots in batches
+    if (screenshotFiles.length > 0) {
+      deleteProgress.logs.push({
+        timestamp: new Date().toISOString(),
+        message: `Deleting ${screenshotFiles.length} excess screenshots...`,
+        type: 'info'
+      });
+
+      // Delete in batches of 100 to avoid command line length limits
+      const batchSize = 100;
+      for (let i = 0; i < screenshotFiles.length; i += batchSize) {
+        const batch = screenshotFiles.slice(i, i + batchSize);
+        const filesArg = batch.map(f => `"${f}"`).join(' ');
+        const cmd = `cd ${config.remotePath}/screenshots && rm -f ${filesArg}`;
+
+        try {
+          await execSshCommand(config, cmd, platform, 60000);
+          deleteProgress.deletedFiles += batch.length;
+          deleteProgress.currentFile = batch[batch.length - 1];
+          deleteProgress.logs.push({
+            timestamp: new Date().toISOString(),
+            message: `Deleted batch of ${batch.length} screenshots (${deleteProgress.deletedFiles}/${deleteProgress.totalFiles} total)`,
+            type: 'success'
+          });
+        } catch (error) {
+          deleteProgress.failedFiles += batch.length;
+          deleteProgress.logs.push({
+            timestamp: new Date().toISOString(),
+            message: `Failed to delete screenshot batch: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            type: 'error'
+          });
+        }
+      }
+    }
+
+    // Delete thumbnails in batches
+    if (thumbnailFiles.length > 0) {
+      deleteProgress.logs.push({
+        timestamp: new Date().toISOString(),
+        message: `Deleting ${thumbnailFiles.length} excess thumbnails...`,
+        type: 'info'
+      });
+
+      const batchSize = 100;
+      for (let i = 0; i < thumbnailFiles.length; i += batchSize) {
+        const batch = thumbnailFiles.slice(i, i + batchSize);
+        const filesArg = batch.map(f => `"${f}"`).join(' ');
+        const cmd = `cd ${config.remotePath}/thumbnails && rm -f ${filesArg}`;
+
+        try {
+          await execSshCommand(config, cmd, platform, 60000);
+          deleteProgress.deletedFiles += batch.length;
+          deleteProgress.currentFile = batch[batch.length - 1];
+          deleteProgress.logs.push({
+            timestamp: new Date().toISOString(),
+            message: `Deleted batch of ${batch.length} thumbnails (${deleteProgress.deletedFiles}/${deleteProgress.totalFiles} total)`,
+            type: 'success'
+          });
+        } catch (error) {
+          deleteProgress.failedFiles += batch.length;
+          deleteProgress.logs.push({
+            timestamp: new Date().toISOString(),
+            message: `Failed to delete thumbnail batch: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            type: 'error'
+          });
+        }
+      }
+    }
+
+    deleteProgress.status = 'completed';
+    deleteProgress.completedAt = new Date().toISOString();
+    deleteProgress.logs.push({
+      timestamp: new Date().toISOString(),
+      message: `Deletion complete! Deleted ${deleteProgress.deletedFiles} files, ${deleteProgress.failedFiles} failed.`,
+      type: deleteProgress.failedFiles > 0 ? 'error' : 'success'
+    });
+  } catch (error) {
+    deleteProgress.status = 'error';
+    deleteProgress.error = error instanceof Error ? error.message : 'Unknown error';
+    deleteProgress.completedAt = new Date().toISOString();
+    deleteProgress.logs.push({
+      timestamp: new Date().toISOString(),
+      message: `Deletion failed: ${deleteProgress.error}`,
+      type: 'error'
+    });
+  }
 }
 
 async function testVpsConnection(
@@ -538,6 +772,27 @@ export async function GET(request: NextRequest) {
         });
       }
 
+      case 'analyze-excess': {
+        // Analyze VPS for files not linked to any template in SQLite
+        // SQLite database is the source of truth
+        const analysis = await analyzeExcessVpsFiles(config, platform);
+        return NextResponse.json({
+          ...analysis,
+          platform,
+          message: analysis.totalExcessCount > 0
+            ? `Found ${analysis.totalExcessCount} excess files on VPS (${analysis.excessScreenshots} screenshots, ${analysis.excessThumbnails} thumbnails) not linked to any template in the database.`
+            : 'No excess files found. VPS storage matches the database.'
+        });
+      }
+
+      case 'delete-excess-status': {
+        // Get current delete operation status
+        return NextResponse.json({
+          progress: deleteProgress,
+          platform
+        });
+      }
+
       default:
         // Default: return full status and stats
         const [localStats, vpsStats] = await Promise.all([
@@ -709,6 +964,56 @@ export async function POST(request: NextRequest) {
           message: 'Platform detection refreshed',
           platform: freshPlatform
         });
+      }
+
+      case 'delete-excess': {
+        // Delete excess files from VPS that are not in the SQLite database
+        // SQLite database is the source of truth
+
+        // Check if a delete operation is already running
+        if (deleteProgress?.status === 'running') {
+          return NextResponse.json(
+            { error: 'A delete operation is already in progress', progress: deleteProgress },
+            { status: 400 }
+          );
+        }
+
+        // Test connection first
+        const connectionTest = await testVpsConnection(config, platform);
+        if (!connectionTest.connected) {
+          return NextResponse.json(
+            { error: `Cannot connect to VPS: ${connectionTest.error}`, platform },
+            { status: 400 }
+          );
+        }
+
+        // Analyze excess files
+        const analysis = await analyzeExcessVpsFiles(config, platform);
+
+        if (analysis.totalExcessCount === 0) {
+          return NextResponse.json({
+            message: 'No excess files to delete. VPS storage matches the database.',
+            deletedCount: 0,
+            platform
+          });
+        }
+
+        // Start async deletion
+        deleteExcessVpsFiles(config, platform, analysis.excessFiles);
+
+        return NextResponse.json({
+          message: `Started deletion of ${analysis.totalExcessCount} excess files`,
+          totalFiles: analysis.totalExcessCount,
+          excessScreenshots: analysis.excessScreenshots,
+          excessThumbnails: analysis.excessThumbnails,
+          platform
+        });
+      }
+
+      case 'clear-delete-progress': {
+        // Clear the delete progress
+        deleteProgress = null;
+        return NextResponse.json({ message: 'Delete progress cleared' });
       }
 
       default:

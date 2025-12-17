@@ -38,7 +38,11 @@ import {
   Monitor,
   Apple,
   Folder,
-  ExternalLink
+  ExternalLink,
+  Trash2,
+  Database,
+  Search,
+  FileX2
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -92,6 +96,35 @@ interface PlatformInfo {
 interface SetupInstructions {
   sshSetup: string[];
   rsyncSetup: string[];
+}
+
+interface ExcessFile {
+  filename: string;
+  type: 'screenshot' | 'thumbnail';
+  path: string;
+}
+
+interface ExcessAnalysis {
+  excessFiles: ExcessFile[];
+  totalExcessCount: number;
+  excessScreenshots: number;
+  excessThumbnails: number;
+  validInDb: { screenshots: number; thumbnails: number };
+  totalOnVps: { screenshots: number; thumbnails: number };
+  estimatedSizeBytes: number;
+  message: string;
+}
+
+interface DeleteProgress {
+  status: 'running' | 'completed' | 'error';
+  totalFiles: number;
+  deletedFiles: number;
+  failedFiles: number;
+  currentFile: string;
+  logs: Array<{ timestamp: string; message: string; type: 'info' | 'success' | 'error' }>;
+  startedAt: string;
+  completedAt?: string;
+  error?: string;
 }
 
 interface ExpandableAccordionProps {
@@ -525,6 +558,11 @@ export function SyncSection() {
   const [platform, setPlatform] = useState<PlatformInfo | null>(null);
   const [setupInstructions, setSetupInstructions] = useState<SetupInstructions | null>(null);
 
+  // Excess files state
+  const [excessAnalysis, setExcessAnalysis] = useState<ExcessAnalysis | null>(null);
+  const [isAnalyzingExcess, setIsAnalyzingExcess] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState<DeleteProgress | null>(null);
+
   // VPS Config
   const [vpsConfig, setVpsConfig] = useState<VpsConfig>({
     user: 'root',
@@ -747,6 +785,122 @@ export function SyncSection() {
     }
   }, [authHeaders]);
 
+  // Polling ref for delete progress
+  const deletePollingRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Analyze excess files on VPS
+  const analyzeExcessFiles = useCallback(async () => {
+    setIsAnalyzingExcess(true);
+    setExcessAnalysis(null);
+    try {
+      const params = new URLSearchParams({
+        action: 'analyze-excess',
+        vpsUser: vpsConfig.user,
+        vpsHost: vpsConfig.host,
+        vpsPath: vpsConfig.remotePath,
+        sshKey: vpsConfig.sshKeyPath
+      });
+
+      const response = await fetch(`/api/admin/sync?${params}`, {
+        headers: { 'Authorization': `Bearer ${resolveAuthToken()}` }
+      });
+
+      if (!response.ok) throw new Error('Failed to analyze excess files');
+
+      const data = await response.json();
+      setExcessAnalysis(data);
+
+      if (data.totalExcessCount > 0) {
+        toast.warning(`Found ${data.totalExcessCount} excess files on VPS`);
+      } else {
+        toast.success('No excess files found - VPS is clean!');
+      }
+    } catch (error) {
+      toast.error('Failed to analyze excess files');
+      console.error('Failed to analyze excess files:', error);
+    } finally {
+      setIsAnalyzingExcess(false);
+    }
+  }, [resolveAuthToken, vpsConfig]);
+
+  // Check delete progress
+  const checkDeleteProgress = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({
+        action: 'delete-excess-status',
+        vpsUser: vpsConfig.user,
+        vpsHost: vpsConfig.host,
+        vpsPath: vpsConfig.remotePath,
+        sshKey: vpsConfig.sshKeyPath
+      });
+
+      const response = await fetch(`/api/admin/sync?${params}`, {
+        headers: { 'Authorization': `Bearer ${resolveAuthToken()}` }
+      });
+
+      if (!response.ok) return;
+
+      const data = await response.json();
+      setDeleteProgress(data.progress);
+
+      // Stop polling if delete is complete
+      if (data.progress && ['completed', 'error'].includes(data.progress.status)) {
+        if (deletePollingRef.current) {
+          clearInterval(deletePollingRef.current);
+          deletePollingRef.current = null;
+        }
+        // Reload stats and analysis after deletion
+        loadData();
+        analyzeExcessFiles();
+      }
+    } catch (error) {
+      console.error('Failed to check delete progress:', error);
+    }
+  }, [resolveAuthToken, vpsConfig, loadData, analyzeExcessFiles]);
+
+  // Start deletion of excess files
+  const startDeleteExcess = useCallback(async () => {
+    try {
+      const response = await fetch('/api/admin/sync', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          action: 'delete-excess',
+          config: vpsConfig
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to start deletion');
+      }
+
+      toast.success(`Started deletion of ${data.totalFiles} excess files`);
+
+      // Start polling for progress
+      deletePollingRef.current = setInterval(checkDeleteProgress, 1000);
+      checkDeleteProgress();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to start deletion');
+    }
+  }, [authHeaders, vpsConfig, checkDeleteProgress]);
+
+  // Clear delete progress
+  const clearDeleteProgress = useCallback(async () => {
+    try {
+      await fetch('/api/admin/sync', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ action: 'clear-delete-progress' })
+      });
+      setDeleteProgress(null);
+      setExcessAnalysis(null);
+    } catch (error) {
+      console.error('Failed to clear delete progress:', error);
+    }
+  }, [authHeaders]);
+
   // Initial load
   useEffect(() => {
     loadData();
@@ -755,6 +909,9 @@ export function SyncSection() {
     return () => {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
+      }
+      if (deletePollingRef.current) {
+        clearInterval(deletePollingRef.current);
       }
     };
   }, [loadData, checkSyncStatus]);
@@ -1256,6 +1413,270 @@ export function SyncSection() {
                     </div>
                   ))}
                 </ScrollArea>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      {/* Delete Excess Files */}
+      <Card className="p-6">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="p-2 bg-red-100 rounded-lg">
+            <Trash2 className="h-6 w-6 text-red-600" />
+          </div>
+          <div>
+            <h3 className="text-lg font-semibold">Delete Excess Files</h3>
+            <p className="text-sm text-gray-500">Remove orphaned images from VPS not linked to any template</p>
+          </div>
+        </div>
+
+        {/* How It Works Explanation */}
+        <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg">
+          <div className="flex items-start gap-3">
+            <div className="p-2 bg-blue-100 rounded-lg shrink-0">
+              <Database className="h-5 w-5 text-blue-600" />
+            </div>
+            <div>
+              <h4 className="font-medium text-blue-900 mb-2">How This Works</h4>
+              <div className="text-sm text-blue-800 space-y-2">
+                <p>
+                  <strong>The SQLite database is the source of truth.</strong> This feature compares
+                  files on the VPS against templates in the database and identifies &quot;orphaned&quot; images -
+                  files that exist on the VPS but have no corresponding template record.
+                </p>
+                <p>
+                  This typically happens when templates are deleted from the database but their
+                  screenshots remain on the VPS, or during failed scraping operations that leave
+                  behind partial data.
+                </p>
+                <div className="bg-white/60 rounded p-3 mt-3">
+                  <p className="font-medium text-blue-900 mb-1">Process:</p>
+                  <ol className="list-decimal list-inside space-y-1 text-blue-700">
+                    <li>Click <strong>Analyze</strong> to scan VPS and compare against database</li>
+                    <li>Review the list of excess files found</li>
+                    <li>Click <strong>Delete Excess</strong> to remove orphaned files</li>
+                    <li>Files are deleted in batches via SSH for safety</li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Connection Warning */}
+        {connectionStatus !== 'connected' && (
+          <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+            <div className="flex items-center gap-2 text-amber-800">
+              <AlertTriangle className="h-4 w-4" />
+              <span className="font-medium">Connect to VPS first to analyze excess files</span>
+            </div>
+          </div>
+        )}
+
+        {/* Analysis Section */}
+        {connectionStatus === 'connected' && !deleteProgress && (
+          <div className="space-y-6">
+            {/* Analyze Button */}
+            <div className="flex justify-center">
+              <Button
+                onClick={analyzeExcessFiles}
+                disabled={isAnalyzingExcess}
+                variant="outline"
+                size="lg"
+                className="gap-2"
+              >
+                {isAnalyzingExcess ? (
+                  <>
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    Analyzing VPS...
+                  </>
+                ) : (
+                  <>
+                    <Search className="h-5 w-5" />
+                    Analyze Excess Files
+                  </>
+                )}
+              </Button>
+            </div>
+
+            {/* Analysis Results */}
+            {excessAnalysis && (
+              <div className="space-y-4">
+                {/* Summary Stats */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="p-4 bg-gray-50 rounded-lg text-center">
+                    <Database className="h-6 w-6 text-blue-500 mx-auto mb-2" />
+                    <p className="text-2xl font-bold text-gray-900">{excessAnalysis.validInDb.screenshots}</p>
+                    <p className="text-xs text-gray-500">Templates in DB</p>
+                  </div>
+                  <div className="p-4 bg-gray-50 rounded-lg text-center">
+                    <Server className="h-6 w-6 text-green-500 mx-auto mb-2" />
+                    <p className="text-2xl font-bold text-gray-900">{excessAnalysis.totalOnVps.screenshots}</p>
+                    <p className="text-xs text-gray-500">Screenshots on VPS</p>
+                  </div>
+                  <div className="p-4 bg-gray-50 rounded-lg text-center">
+                    <Server className="h-6 w-6 text-green-500 mx-auto mb-2" />
+                    <p className="text-2xl font-bold text-gray-900">{excessAnalysis.totalOnVps.thumbnails}</p>
+                    <p className="text-xs text-gray-500">Thumbnails on VPS</p>
+                  </div>
+                  <div className={cn(
+                    "p-4 rounded-lg text-center",
+                    excessAnalysis.totalExcessCount > 0 ? "bg-red-50" : "bg-green-50"
+                  )}>
+                    <FileX2 className={cn(
+                      "h-6 w-6 mx-auto mb-2",
+                      excessAnalysis.totalExcessCount > 0 ? "text-red-500" : "text-green-500"
+                    )} />
+                    <p className={cn(
+                      "text-2xl font-bold",
+                      excessAnalysis.totalExcessCount > 0 ? "text-red-600" : "text-green-600"
+                    )}>{excessAnalysis.totalExcessCount}</p>
+                    <p className="text-xs text-gray-500">Excess Files</p>
+                  </div>
+                </div>
+
+                {excessAnalysis.totalExcessCount > 0 ? (
+                  <>
+                    {/* Excess Breakdown */}
+                    <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                      <div className="flex items-center gap-2 mb-3">
+                        <AlertTriangle className="h-5 w-5 text-red-600" />
+                        <h4 className="font-medium text-red-900">Excess Files Found</h4>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                          <span className="text-red-700">Excess Screenshots:</span>
+                          <span className="ml-2 font-bold text-red-900">{excessAnalysis.excessScreenshots}</span>
+                        </div>
+                        <div>
+                          <span className="text-red-700">Excess Thumbnails:</span>
+                          <span className="ml-2 font-bold text-red-900">{excessAnalysis.excessThumbnails}</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-red-600 mt-2">
+                        Estimated space to reclaim: ~{(excessAnalysis.estimatedSizeBytes / (1024 * 1024)).toFixed(1)} MB
+                      </p>
+                    </div>
+
+                    {/* File List Preview */}
+                    <div>
+                      <h4 className="text-sm font-medium mb-2">Files to Delete (preview)</h4>
+                      <ScrollArea className="h-32 border rounded-lg p-2 bg-gray-50">
+                        {excessAnalysis.excessFiles.slice(0, 100).map((file, i) => (
+                          <div key={i} className="text-xs py-1 px-2 hover:bg-white rounded flex items-center gap-2">
+                            <Badge variant="outline" className={cn(
+                              "text-[10px] px-1",
+                              file.type === 'screenshot' ? "bg-blue-50 text-blue-700" : "bg-purple-50 text-purple-700"
+                            )}>
+                              {file.type === 'screenshot' ? 'SS' : 'TH'}
+                            </Badge>
+                            <span className="truncate text-gray-600">{file.filename}</span>
+                          </div>
+                        ))}
+                        {excessAnalysis.excessFiles.length > 100 && (
+                          <div className="text-xs text-gray-400 text-center py-2">
+                            +{excessAnalysis.excessFiles.length - 100} more files
+                          </div>
+                        )}
+                      </ScrollArea>
+                    </div>
+
+                    {/* Delete Button */}
+                    <div className="flex justify-center gap-3">
+                      <Button variant="outline" onClick={() => setExcessAnalysis(null)}>
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        onClick={startDeleteExcess}
+                        className="gap-2"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        Delete {excessAnalysis.totalExcessCount} Excess Files
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-center py-8">
+                    <CheckCircle2 className="h-12 w-12 text-green-500 mx-auto mb-3" />
+                    <p className="text-gray-600 font-medium">VPS is clean!</p>
+                    <p className="text-sm text-gray-500">
+                      All files on VPS are linked to templates in the database.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Delete Progress */}
+        {deleteProgress && (
+          <div className="space-y-4">
+            {/* Status Header */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {deleteProgress.status === 'running' && (
+                  <Loader2 className="h-5 w-5 animate-spin text-red-500" />
+                )}
+                {deleteProgress.status === 'completed' && (
+                  <CheckCircle2 className="h-5 w-5 text-green-500" />
+                )}
+                {deleteProgress.status === 'error' && (
+                  <XCircle className="h-5 w-5 text-red-500" />
+                )}
+                <span className="font-medium capitalize">
+                  {deleteProgress.status === 'running' ? 'Deleting excess files...' : deleteProgress.status}
+                </span>
+              </div>
+              <Badge variant="outline">
+                {deleteProgress.deletedFiles} / {deleteProgress.totalFiles}
+              </Badge>
+            </div>
+
+            {/* Progress Bar */}
+            <div className="space-y-2">
+              <Progress
+                value={deleteProgress.totalFiles > 0
+                  ? (deleteProgress.deletedFiles / deleteProgress.totalFiles) * 100
+                  : 0}
+                className="h-3"
+              />
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>Deleted: {deleteProgress.deletedFiles}</span>
+                {deleteProgress.failedFiles > 0 && (
+                  <span className="text-red-600">Failed: {deleteProgress.failedFiles}</span>
+                )}
+                <span>Total: {deleteProgress.totalFiles}</span>
+              </div>
+            </div>
+
+            {/* Logs */}
+            <div>
+              <h4 className="text-sm font-medium mb-2">Delete Log</h4>
+              <ScrollArea className="h-32 bg-gray-900 rounded-lg p-3 font-mono text-xs">
+                {deleteProgress.logs.map((log, i) => (
+                  <div key={i} className={cn(
+                    log.type === 'error' && 'text-red-400',
+                    log.type === 'success' && 'text-green-400',
+                    log.type === 'info' && 'text-gray-300'
+                  )}>
+                    <span className="text-gray-500">
+                      {new Date(log.timestamp).toLocaleTimeString()}
+                    </span>{' '}
+                    {log.message}
+                  </div>
+                ))}
+              </ScrollArea>
+            </div>
+
+            {/* Completed Actions */}
+            {['completed', 'error'].includes(deleteProgress.status) && (
+              <div className="flex justify-center">
+                <Button variant="outline" onClick={clearDeleteProgress}>
+                  Clear & Refresh
+                </Button>
               </div>
             )}
           </div>
