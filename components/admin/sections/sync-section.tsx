@@ -33,7 +33,12 @@ import {
   FolderSync,
   ImageIcon,
   Info,
-  Settings2
+  Settings2,
+  Terminal,
+  Monitor,
+  Apple,
+  Folder,
+  ExternalLink
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -72,6 +77,23 @@ interface VpsConfig {
   sshKeyPath: string;
 }
 
+interface PlatformInfo {
+  os: 'windows' | 'macos' | 'linux';
+  isWindows: boolean;
+  hasRsync: boolean;
+  hasSsh: boolean;
+  sshPath: string | null;
+  rsyncPath: string | null;
+  shell: string;
+  homedir: string;
+  pathSeparator: string;
+}
+
+interface SetupInstructions {
+  sshSetup: string[];
+  rsyncSetup: string[];
+}
+
 interface ExpandableAccordionProps {
   title: string;
   icon: React.ReactNode;
@@ -105,7 +127,86 @@ function ExpandableAccordion({ title, icon, defaultOpen = false, children, badge
   );
 }
 
-function StorageComparisonDiagram({ local, vps }: { local: StorageStats | null; vps: StorageStats | null }) {
+function PlatformBadge({ platform }: { platform: PlatformInfo | null }) {
+  if (!platform) return null;
+
+  const getOsIcon = () => {
+    switch (platform.os) {
+      case 'windows':
+        return <Monitor className="h-3 w-3" />;
+      case 'macos':
+        return <Apple className="h-3 w-3" />;
+      default:
+        return <Terminal className="h-3 w-3" />;
+    }
+  };
+
+  const getOsLabel = () => {
+    switch (platform.os) {
+      case 'windows':
+        return 'Windows';
+      case 'macos':
+        return 'macOS';
+      default:
+        return 'Linux';
+    }
+  };
+
+  return (
+    <Badge variant="outline" className="gap-1.5 text-xs">
+      {getOsIcon()}
+      {getOsLabel()}
+    </Badge>
+  );
+}
+
+function ToolStatusBadge({ available, name }: { available: boolean; name: string }) {
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        "gap-1 text-xs",
+        available ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200"
+      )}
+    >
+      {available ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+      {name}
+    </Badge>
+  );
+}
+
+function VpsDirectoryIndicator({ config }: { config: VpsConfig }) {
+  return (
+    <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4">
+      <div className="flex items-start gap-3">
+        <div className="p-2 bg-green-100 rounded-lg">
+          <Folder className="h-5 w-5 text-green-600" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h4 className="font-medium text-green-900 mb-1">VPS Target Directory</h4>
+          <p className="text-sm text-green-700 mb-2">Images will sync to/from this location on the VPS:</p>
+          <div className="space-y-1">
+            <code className="block text-xs bg-white/80 text-green-800 px-3 py-2 rounded border border-green-200 font-mono">
+              {config.user}@{config.host}:{config.remotePath}
+            </code>
+            <div className="flex gap-4 text-xs text-green-600 mt-2">
+              <span className="flex items-center gap-1">
+                <ImageIcon className="h-3 w-3" />
+                Screenshots: {config.remotePath}/screenshots/
+              </span>
+              <span className="flex items-center gap-1">
+                <ImageIcon className="h-3 w-3" />
+                Thumbnails: {config.remotePath}/thumbnails/
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StorageComparisonDiagram({ local, vps, config }: { local: StorageStats | null; vps: StorageStats | null; config: VpsConfig }) {
   const maxCount = Math.max(
     local?.total.count || 0,
     vps?.total.count || 0,
@@ -117,6 +218,9 @@ function StorageComparisonDiagram({ local, vps }: { local: StorageStats | null; 
 
   return (
     <div className="space-y-6">
+      {/* VPS Directory Indicator */}
+      <VpsDirectoryIndicator config={config} />
+
       {/* Visual comparison */}
       <div className="grid grid-cols-2 gap-8">
         {/* Local */}
@@ -128,6 +232,7 @@ function StorageComparisonDiagram({ local, vps }: { local: StorageStats | null; 
           <p className="text-2xl font-bold text-blue-600">{local?.total.count || 0}</p>
           <p className="text-sm text-gray-500">files</p>
           <p className="text-xs text-gray-400 mt-1">{local?.total.sizeFormatted || '0 B'}</p>
+          <p className="text-xs text-gray-400 mt-1 font-mono">public/screenshots/</p>
         </div>
 
         {/* VPS */}
@@ -139,6 +244,7 @@ function StorageComparisonDiagram({ local, vps }: { local: StorageStats | null; 
           <p className="text-2xl font-bold text-green-600">{vps?.total.count || 0}</p>
           <p className="text-sm text-gray-500">files</p>
           <p className="text-xs text-gray-400 mt-1">{vps?.total.sizeFormatted || '0 B'}</p>
+          <p className="text-xs text-gray-400 mt-1 font-mono">{config.remotePath}/</p>
         </div>
       </div>
 
@@ -229,7 +335,7 @@ function StorageComparisonDiagram({ local, vps }: { local: StorageStats | null; 
   );
 }
 
-function SyncFlowDiagram({ direction }: { direction: 'push' | 'pull' | 'bidirectional' }) {
+function SyncFlowDiagram({ direction, config }: { direction: 'push' | 'pull' | 'bidirectional'; config: VpsConfig }) {
   return (
     <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl p-6">
       <div className="flex items-center justify-center gap-4">
@@ -270,7 +376,7 @@ function SyncFlowDiagram({ direction }: { direction: 'push' | 'pull' | 'bidirect
             <Cloud className="h-8 w-8 text-green-600" />
           </div>
           <span className="text-sm font-medium text-gray-700">VPS</span>
-          <span className="text-xs text-gray-500">/data/</span>
+          <span className="text-xs text-gray-500 font-mono">{config.remotePath.split('/').pop()}/</span>
         </div>
       </div>
 
@@ -278,6 +384,123 @@ function SyncFlowDiagram({ direction }: { direction: 'push' | 'pull' | 'bidirect
         {direction === 'push' && 'Uploads local images to VPS server'}
         {direction === 'pull' && 'Downloads VPS images to local machine'}
         {direction === 'bidirectional' && 'Syncs both directions - newest files win'}
+      </div>
+
+      {/* Target path indicator */}
+      <div className="mt-4 text-center">
+        <code className="text-xs bg-white px-3 py-1.5 rounded border text-gray-600">
+          {config.user}@{config.host}:{config.remotePath}
+        </code>
+      </div>
+    </div>
+  );
+}
+
+function WindowsSetupGuide({ platform, setupInstructions }: {
+  platform: PlatformInfo;
+  setupInstructions: SetupInstructions | null;
+}) {
+  if (!platform.isWindows) return null;
+
+  return (
+    <div className="space-y-4">
+      {/* Platform Tools Status */}
+      <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+        <h4 className="font-medium text-blue-900 mb-3 flex items-center gap-2">
+          <Monitor className="h-4 w-4" />
+          Windows System Status
+        </h4>
+        <div className="flex flex-wrap gap-2 mb-3">
+          <ToolStatusBadge available={platform.hasSsh} name="SSH" />
+          <ToolStatusBadge available={platform.hasRsync} name="rsync" />
+        </div>
+        {platform.sshPath && (
+          <p className="text-xs text-blue-700 mb-1">
+            SSH path: <code className="bg-blue-100 px-1 rounded">{platform.sshPath}</code>
+          </p>
+        )}
+        {platform.rsyncPath && (
+          <p className="text-xs text-blue-700">
+            rsync path: <code className="bg-blue-100 px-1 rounded">{platform.rsyncPath}</code>
+          </p>
+        )}
+      </div>
+
+      {/* rsync Installation Guide (if missing) */}
+      {!platform.hasRsync && (
+        <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
+          <h4 className="font-medium text-amber-900 mb-3 flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4" />
+            rsync Not Found - Installation Required
+          </h4>
+          <div className="space-y-3 text-sm text-amber-800">
+            <p>rsync is required for syncing images. Choose one of these options:</p>
+
+            <div className="bg-white rounded-lg p-3 border border-amber-200">
+              <h5 className="font-medium mb-2">Option 1: Install Git for Windows (Recommended)</h5>
+              <ol className="list-decimal list-inside space-y-1 text-xs">
+                <li>Download from <a href="https://git-scm.com/download/win" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline inline-flex items-center gap-1">git-scm.com <ExternalLink className="h-3 w-3" /></a></li>
+                <li>During installation, ensure &quot;Git Bash&quot; is selected</li>
+                <li>Restart this application after installation</li>
+              </ol>
+            </div>
+
+            <div className="bg-white rounded-lg p-3 border border-amber-200">
+              <h5 className="font-medium mb-2">Option 2: Install cwRsync</h5>
+              <ol className="list-decimal list-inside space-y-1 text-xs">
+                <li>Download from <a href="https://www.itefix.net/cwrsync" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline inline-flex items-center gap-1">itefix.net/cwrsync <ExternalLink className="h-3 w-3" /></a></li>
+                <li>Install and add to system PATH</li>
+                <li>Restart this application</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SSH Setup Guide */}
+      {setupInstructions && setupInstructions.sshSetup.length > 0 && (
+        <div className="bg-white rounded-lg p-4 border">
+          <h5 className="font-medium text-gray-800 mb-3">Windows SSH Setup Guide</h5>
+          <div className="bg-gray-900 text-gray-100 p-3 rounded font-mono text-xs overflow-x-auto">
+            {setupInstructions.sshSetup.map((line, i) => (
+              <div key={i} className={cn(
+                line.startsWith('#') ? 'text-gray-400' : 'text-green-400',
+                !line && 'h-2'
+              )}>
+                {line}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MacLinuxSetupGuide({ platform, config }: {
+  platform: PlatformInfo;
+  config: VpsConfig;
+}) {
+  if (platform.isWindows) return null;
+
+  return (
+    <div className="bg-white rounded-lg p-4 border">
+      <h5 className="font-medium text-gray-800 mb-3">SSH Setup Guide ({platform.os === 'macos' ? 'macOS' : 'Linux'})</h5>
+      <div className="space-y-3 text-sm">
+        <div className="bg-gray-900 text-gray-100 p-3 rounded font-mono text-xs">
+          <div className="text-gray-400"># 1. Generate SSH key (if you don&apos;t have one)</div>
+          <div className="text-green-400">ssh-keygen -t ed25519 -C &quot;webflow-gallery&quot;</div>
+          <div className="text-gray-500 mt-2"># Press Enter to accept default location (~/.ssh/id_ed25519)</div>
+        </div>
+        <div className="bg-gray-900 text-gray-100 p-3 rounded font-mono text-xs">
+          <div className="text-gray-400"># 2. Copy your public key to the VPS</div>
+          <div className="text-green-400">ssh-copy-id -i ~/.ssh/id_ed25519.pub {config.user}@{config.host}</div>
+          <div className="text-gray-500 mt-2"># Enter VPS password when prompted</div>
+        </div>
+        <div className="bg-gray-900 text-gray-100 p-3 rounded font-mono text-xs">
+          <div className="text-gray-400"># 3. Test the connection</div>
+          <div className="text-green-400">ssh -i ~/.ssh/id_ed25519 {config.user}@{config.host} &quot;echo connected&quot;</div>
+        </div>
       </div>
     </div>
   );
@@ -299,6 +522,8 @@ export function SyncSection() {
   } | null>(null);
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [selectedDirection, setSelectedDirection] = useState<'push' | 'pull' | 'bidirectional'>('push');
+  const [platform, setPlatform] = useState<PlatformInfo | null>(null);
+  const [setupInstructions, setSetupInstructions] = useState<SetupInstructions | null>(null);
 
   // VPS Config
   const [vpsConfig, setVpsConfig] = useState<VpsConfig>({
@@ -339,6 +564,9 @@ export function SyncSection() {
       setVpsStats(data.vps);
       setDiscrepancies(data.discrepancies);
       setConnectionStatus(data.vps ? 'connected' : 'disconnected');
+      if (data.platform) {
+        setPlatform(data.platform);
+      }
     } catch (error) {
       console.error('Failed to load sync data:', error);
       setConnectionStatus('disconnected');
@@ -367,6 +595,12 @@ export function SyncSection() {
       const data = await response.json();
       setConnectionStatus(data.connected ? 'connected' : 'disconnected');
       setConnectionError(data.error || null);
+      if (data.platform) {
+        setPlatform(data.platform);
+      }
+      if (data.setupInstructions) {
+        setSetupInstructions(data.setupInstructions);
+      }
 
       if (data.connected) {
         toast.success('VPS connection successful');
@@ -381,6 +615,25 @@ export function SyncSection() {
     }
   }, [resolveAuthToken, vpsConfig, loadData]);
 
+  // Refresh platform detection
+  const refreshPlatform = useCallback(async () => {
+    try {
+      const response = await fetch('/api/admin/sync', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ action: 'refresh-platform' })
+      });
+
+      const data = await response.json();
+      if (data.platform) {
+        setPlatform(data.platform);
+        toast.success('Platform detection refreshed');
+      }
+    } catch (error) {
+      toast.error('Failed to refresh platform detection');
+    }
+  }, [authHeaders]);
+
   // Check sync status
   const checkSyncStatus = useCallback(async () => {
     try {
@@ -392,6 +645,9 @@ export function SyncSection() {
 
       const data = await response.json();
       setSyncProgress(data.progress);
+      if (data.platform) {
+        setPlatform(data.platform);
+      }
 
       // Stop polling if sync is complete
       if (data.progress && ['completed', 'error', 'cancelled'].includes(data.progress.status)) {
@@ -422,6 +678,9 @@ export function SyncSection() {
 
       if (!response.ok) {
         const data = await response.json();
+        if (data.setupInstructions) {
+          setSetupInstructions(data.setupInstructions);
+        }
         throw new Error(data.error || 'Failed to start sync');
       }
 
@@ -503,6 +762,7 @@ export function SyncSection() {
   const isInSync = discrepancies?.total.localOnly === 0 && discrepancies?.total.vpsOnly === 0;
   const hasDiscrepancies = (discrepancies?.total.localOnly || 0) + (discrepancies?.total.vpsOnly || 0) > 0;
   const isSyncing = syncProgress?.status === 'running';
+  const canSync = platform?.hasRsync && platform?.hasSsh && connectionStatus === 'connected';
 
   return (
     <div className="space-y-6">
@@ -519,7 +779,18 @@ export function SyncSection() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Platform Badge */}
+            <PlatformBadge platform={platform} />
+
+            {/* Tool Status Badges */}
+            {platform && (
+              <>
+                <ToolStatusBadge available={platform.hasSsh} name="SSH" />
+                <ToolStatusBadge available={platform.hasRsync} name="rsync" />
+              </>
+            )}
+
             {/* Connection Status */}
             <div className={cn(
               "flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium",
@@ -597,6 +868,10 @@ export function SyncSection() {
                   onChange={(e) => setVpsConfig(c => ({ ...c, remotePath: e.target.value }))}
                   placeholder="/data/webflow-gallery"
                 />
+                <p className="text-xs text-gray-500 mt-1">
+                  Screenshots: {vpsConfig.remotePath}/screenshots/<br />
+                  Thumbnails: {vpsConfig.remotePath}/thumbnails/
+                </p>
               </div>
               <div>
                 <Label htmlFor="ssh-key">SSH Key Path</Label>
@@ -604,11 +879,20 @@ export function SyncSection() {
                   id="ssh-key"
                   value={vpsConfig.sshKeyPath}
                   onChange={(e) => setVpsConfig(c => ({ ...c, sshKeyPath: e.target.value }))}
-                  placeholder="~/.ssh/id_rsa"
+                  placeholder={platform?.isWindows ? 'C:\\Users\\....\\.ssh\\id_ed25519' : '~/.ssh/id_ed25519'}
                 />
+                {platform?.isWindows && (
+                  <p className="text-xs text-gray-500 mt-1">
+                    Windows: Use full path like C:\Users\YourName\.ssh\id_ed25519 or ~\.ssh\id_ed25519
+                  </p>
+                )}
               </div>
             </div>
-            <div className="flex justify-end mt-4">
+            <div className="flex justify-between items-center mt-4">
+              <Button variant="ghost" size="sm" onClick={refreshPlatform}>
+                <RefreshCcw className="h-4 w-4 mr-2" />
+                Re-detect Platform
+              </Button>
               <Button onClick={testConnection} variant="outline" size="sm">
                 Test Connection
               </Button>
@@ -616,7 +900,7 @@ export function SyncSection() {
           </div>
         )}
 
-        {/* Connection Error & SSH Setup Guide */}
+        {/* Connection Error & Setup Guide */}
         {connectionStatus === 'disconnected' && connectionError && (
           <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded-lg">
             <h4 className="font-medium text-red-800 mb-2 flex items-center gap-2">
@@ -625,31 +909,19 @@ export function SyncSection() {
             </h4>
             <p className="text-sm text-red-700 mb-4">{connectionError}</p>
 
-            <div className="bg-white rounded-lg p-4 border border-red-100">
-              <h5 className="font-medium text-gray-800 mb-3">SSH Setup Guide</h5>
-              <p className="text-sm text-gray-600 mb-3">
-                To connect from this web app to your VPS, you need SSH key-based authentication:
-              </p>
-              <div className="space-y-3 text-sm">
-                <div className="bg-gray-900 text-gray-100 p-3 rounded font-mono text-xs">
-                  <div className="text-gray-400"># 1. Generate SSH key (if you don&apos;t have one)</div>
-                  <div className="text-green-400">ssh-keygen -t ed25519 -C &quot;webflow-gallery&quot;</div>
-                  <div className="text-gray-500 mt-2"># Press Enter to accept default location (~/.ssh/id_ed25519)</div>
-                </div>
-                <div className="bg-gray-900 text-gray-100 p-3 rounded font-mono text-xs">
-                  <div className="text-gray-400"># 2. Copy your public key to the VPS</div>
-                  <div className="text-green-400">ssh-copy-id -i ~/.ssh/id_ed25519.pub {vpsConfig.user}@{vpsConfig.host}</div>
-                  <div className="text-gray-500 mt-2"># Enter VPS password when prompted</div>
-                </div>
-                <div className="bg-gray-900 text-gray-100 p-3 rounded font-mono text-xs">
-                  <div className="text-gray-400"># 3. Test the connection</div>
-                  <div className="text-green-400">ssh -i ~/.ssh/id_ed25519 {vpsConfig.user}@{vpsConfig.host} &quot;echo connected&quot;</div>
-                </div>
-                <p className="text-gray-600">
-                  After setup, update the SSH Key Path above to <code className="bg-gray-100 px-1 rounded">~/.ssh/id_ed25519</code> and click Test Connection.
-                </p>
-              </div>
-            </div>
+            {/* Platform-specific setup guide */}
+            {platform?.isWindows ? (
+              <WindowsSetupGuide platform={platform} setupInstructions={setupInstructions} />
+            ) : platform ? (
+              <MacLinuxSetupGuide platform={platform} config={vpsConfig} />
+            ) : null}
+          </div>
+        )}
+
+        {/* rsync missing warning when connected but no rsync */}
+        {connectionStatus === 'connected' && platform && !platform.hasRsync && (
+          <div className="mt-6">
+            <WindowsSetupGuide platform={platform} setupInstructions={setupInstructions} />
           </div>
         )}
       </Card>
@@ -671,7 +943,7 @@ export function SyncSection() {
               <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
             </div>
           ) : (
-            <StorageComparisonDiagram local={localStats} vps={vpsStats} />
+            <StorageComparisonDiagram local={localStats} vps={vpsStats} config={vpsConfig} />
           )}
         </ExpandableAccordion>
       </Card>
@@ -787,6 +1059,21 @@ export function SyncSection() {
           </div>
         </div>
 
+        {/* Missing Tools Warning */}
+        {platform && (!platform.hasRsync || !platform.hasSsh) && (
+          <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+            <div className="flex items-center gap-2 text-amber-800 font-medium mb-2">
+              <AlertTriangle className="h-4 w-4" />
+              Missing Required Tools
+            </div>
+            <p className="text-sm text-amber-700">
+              {!platform.hasSsh && 'SSH is not installed. '}
+              {!platform.hasRsync && 'rsync is not installed. '}
+              Please install the missing tools to enable sync operations.
+            </p>
+          </div>
+        )}
+
         {/* Direction Selection */}
         {!isSyncing && !syncProgress && (
           <div className="mb-6">
@@ -846,7 +1133,7 @@ export function SyncSection() {
 
             {/* Flow Diagram */}
             <div className="mt-6">
-              <SyncFlowDiagram direction={selectedDirection} />
+              <SyncFlowDiagram direction={selectedDirection} config={vpsConfig} />
             </div>
 
             {/* Start Button */}
@@ -854,13 +1141,20 @@ export function SyncSection() {
               <Button
                 size="lg"
                 onClick={startSync}
-                disabled={connectionStatus !== 'connected'}
+                disabled={!canSync}
                 className="gap-2 px-8"
               >
                 <Play className="h-5 w-5" />
                 Start {selectedDirection === 'push' ? 'Push' : selectedDirection === 'pull' ? 'Pull' : 'Sync'}
               </Button>
             </div>
+            {!canSync && (
+              <p className="text-center text-sm text-gray-500 mt-2">
+                {connectionStatus !== 'connected' && 'Connect to VPS first. '}
+                {platform && !platform.hasRsync && 'Install rsync. '}
+                {platform && !platform.hasSsh && 'Install SSH. '}
+              </p>
+            )}
           </div>
         )}
 
@@ -896,7 +1190,7 @@ export function SyncSection() {
             </div>
 
             {/* Flow Diagram for Active Sync */}
-            <SyncFlowDiagram direction={syncProgress.direction} />
+            <SyncFlowDiagram direction={syncProgress.direction} config={vpsConfig} />
 
             {/* Progress Bar */}
             <div className="space-y-2">
@@ -933,7 +1227,7 @@ export function SyncSection() {
                   Clear
                 </Button>
                 {syncProgress.status !== 'completed' && (
-                  <Button onClick={startSync}>
+                  <Button onClick={startSync} disabled={!canSync}>
                     <Play className="h-4 w-4 mr-2" />
                     Restart
                   </Button>
@@ -982,6 +1276,12 @@ export function SyncSection() {
                 your local development machine and the VPS production server. This ensures your
                 template screenshots and thumbnails are always available where needed.
               </p>
+              {platform?.isWindows && (
+                <p className="text-amber-700 bg-amber-50 p-2 rounded">
+                  <strong>Windows Users:</strong> rsync is typically installed via Git for Windows.
+                  Make sure you have Git Bash installed to use sync features.
+                </p>
+              )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1019,7 +1319,7 @@ export function SyncSection() {
                 </div>
                 <div>
                   <span className="text-gray-500">VPS Screenshots:</span>
-                  <code className="block mt-1 text-xs bg-white p-2 rounded border">/data/webflow-gallery/screenshots/</code>
+                  <code className="block mt-1 text-xs bg-white p-2 rounded border">{vpsConfig.remotePath}/screenshots/</code>
                 </div>
                 <div>
                   <span className="text-gray-500">Local Thumbnails:</span>
@@ -1027,7 +1327,7 @@ export function SyncSection() {
                 </div>
                 <div>
                   <span className="text-gray-500">VPS Thumbnails:</span>
-                  <code className="block mt-1 text-xs bg-white p-2 rounded border">/data/webflow-gallery/thumbnails/</code>
+                  <code className="block mt-1 text-xs bg-white p-2 rounded border">{vpsConfig.remotePath}/thumbnails/</code>
                 </div>
               </div>
             </div>

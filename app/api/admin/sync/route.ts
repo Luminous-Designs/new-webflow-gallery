@@ -1,28 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn, ChildProcess, exec } from 'child_process';
-import { promisify } from 'util';
+import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
-
-const execAsync = promisify(exec);
+import {
+  detectPlatform,
+  buildRsyncArgs,
+  execSshCommand,
+  checkSshKey,
+  getSetupInstructions,
+  clearPlatformCache,
+  PlatformInfo
+} from '@/lib/sync/platform';
 
 // Force dynamic rendering
 export const dynamic = 'force-dynamic';
-
-// Expand ~ to home directory
-function expandPath(p: string): string {
-  if (p.startsWith('~/')) {
-    return path.join(os.homedir(), p.slice(2));
-  }
-  return p;
-}
-
-// Build SSH options string with key
-function buildSshOptions(config: { sshKeyPath: string }): string {
-  const keyPath = expandPath(config.sshKeyPath);
-  return `-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes -i "${keyPath}"`;
-}
 
 // VPS Configuration defaults
 const DEFAULT_VPS_CONFIG = {
@@ -107,21 +98,21 @@ async function getLocalStats(): Promise<StorageStats> {
   };
 }
 
-async function getVpsStats(config: typeof DEFAULT_VPS_CONFIG): Promise<StorageStats | null> {
-  const sshOpts = buildSshOptions(config);
-  const sshPrefix = `ssh ${sshOpts} ${config.user}@${config.host}`;
-
+async function getVpsStats(
+  config: typeof DEFAULT_VPS_CONFIG,
+  platform: PlatformInfo
+): Promise<StorageStats | null> {
   try {
     // Get screenshot count and size
-    const screenshotCmd = `${sshPrefix} "ls ${config.remotePath}/screenshots/ 2>/dev/null | wc -l && du -sb ${config.remotePath}/screenshots/ 2>/dev/null | cut -f1 || echo 0"`;
-    const screenshotResult = await execAsync(screenshotCmd, { timeout: 30000 });
+    const screenshotCmd = `ls ${config.remotePath}/screenshots/ 2>/dev/null | wc -l && du -sb ${config.remotePath}/screenshots/ 2>/dev/null | cut -f1 || echo 0`;
+    const screenshotResult = await execSshCommand(config, screenshotCmd, platform, 30000);
     const screenshotLines = screenshotResult.stdout.trim().split('\n');
     const screenshotCount = parseInt(screenshotLines[0]) || 0;
     const screenshotSize = parseInt(screenshotLines[1]) || 0;
 
     // Get thumbnail count and size
-    const thumbnailCmd = `${sshPrefix} "ls ${config.remotePath}/thumbnails/ 2>/dev/null | wc -l && du -sb ${config.remotePath}/thumbnails/ 2>/dev/null | cut -f1 || echo 0"`;
-    const thumbnailResult = await execAsync(thumbnailCmd, { timeout: 30000 });
+    const thumbnailCmd = `ls ${config.remotePath}/thumbnails/ 2>/dev/null | wc -l && du -sb ${config.remotePath}/thumbnails/ 2>/dev/null | cut -f1 || echo 0`;
+    const thumbnailResult = await execSshCommand(config, thumbnailCmd, platform, 30000);
     const thumbnailLines = thumbnailResult.stdout.trim().split('\n');
     const thumbnailCount = parseInt(thumbnailLines[0]) || 0;
     const thumbnailSize = parseInt(thumbnailLines[1]) || 0;
@@ -152,12 +143,14 @@ async function getLocalFiles(type: 'screenshots' | 'thumbnails'): Promise<Set<st
   }
 }
 
-async function getVpsFiles(config: typeof DEFAULT_VPS_CONFIG, type: 'screenshots' | 'thumbnails'): Promise<Set<string>> {
-  const sshOpts = buildSshOptions(config);
-  const sshPrefix = `ssh ${sshOpts} ${config.user}@${config.host}`;
+async function getVpsFiles(
+  config: typeof DEFAULT_VPS_CONFIG,
+  type: 'screenshots' | 'thumbnails',
+  platform: PlatformInfo
+): Promise<Set<string>> {
   try {
-    const cmd = `${sshPrefix} "ls -1 ${config.remotePath}/${type}/ 2>/dev/null"`;
-    const result = await execAsync(cmd, { timeout: 30000 });
+    const cmd = `ls -1 ${config.remotePath}/${type}/ 2>/dev/null`;
+    const result = await execSshCommand(config, cmd, platform, 30000);
     const files = result.stdout.trim().split('\n').filter(f => f && !f.startsWith('.'));
     return new Set(files);
   } catch {
@@ -165,7 +158,10 @@ async function getVpsFiles(config: typeof DEFAULT_VPS_CONFIG, type: 'screenshots
   }
 }
 
-async function getDiscrepancies(config: typeof DEFAULT_VPS_CONFIG): Promise<{
+async function getDiscrepancies(
+  config: typeof DEFAULT_VPS_CONFIG,
+  platform: PlatformInfo
+): Promise<{
   localOnly: Discrepancy[];
   vpsOnly: Discrepancy[];
   total: { localOnly: number; vpsOnly: number };
@@ -173,8 +169,8 @@ async function getDiscrepancies(config: typeof DEFAULT_VPS_CONFIG): Promise<{
   const [localScreenshots, localThumbnails, vpsScreenshots, vpsThumbnails] = await Promise.all([
     getLocalFiles('screenshots'),
     getLocalFiles('thumbnails'),
-    getVpsFiles(config, 'screenshots'),
-    getVpsFiles(config, 'thumbnails')
+    getVpsFiles(config, 'screenshots', platform),
+    getVpsFiles(config, 'thumbnails', platform)
   ]);
 
   const localOnly: Discrepancy[] = [];
@@ -215,50 +211,83 @@ async function getDiscrepancies(config: typeof DEFAULT_VPS_CONFIG): Promise<{
   };
 }
 
-async function testVpsConnection(config: typeof DEFAULT_VPS_CONFIG): Promise<{ connected: boolean; error?: string; keyPath?: string }> {
-  const keyPath = expandPath(config.sshKeyPath);
+async function testVpsConnection(
+  config: typeof DEFAULT_VPS_CONFIG,
+  platform: PlatformInfo
+): Promise<{
+  connected: boolean;
+  error?: string;
+  keyPath?: string;
+  platform: PlatformInfo;
+  setupInstructions?: { sshSetup: string[]; rsyncSetup: string[] };
+}> {
+  const keyCheck = await checkSshKey(config.sshKeyPath);
 
-  // First check if the SSH key exists
-  try {
-    await fs.promises.access(keyPath, fs.constants.R_OK);
-  } catch {
+  // Check if SSH is available on this platform
+  if (!platform.hasSsh) {
     return {
       connected: false,
-      error: `SSH key not found or not readable at: ${keyPath}. Please ensure the key exists and has proper permissions.`,
-      keyPath
+      error: platform.isWindows
+        ? 'SSH is not available. Please install OpenSSH for Windows (Settings > Apps > Optional Features > OpenSSH Client).'
+        : 'SSH is not installed. Please install OpenSSH.',
+      keyPath: keyCheck.path,
+      platform,
+      setupInstructions: getSetupInstructions(platform, config)
     };
   }
 
-  const sshOpts = buildSshOptions(config);
-  const sshPrefix = `ssh ${sshOpts} ${config.user}@${config.host}`;
+  // Check if the SSH key exists
+  if (!keyCheck.exists) {
+    return {
+      connected: false,
+      error: `SSH key not found at: ${keyCheck.path}. Please generate an SSH key.`,
+      keyPath: keyCheck.path,
+      platform,
+      setupInstructions: getSetupInstructions(platform, config)
+    };
+  }
+
+  if (!keyCheck.readable) {
+    return {
+      connected: false,
+      error: `SSH key exists but is not readable at: ${keyCheck.path}. Please check file permissions.`,
+      keyPath: keyCheck.path,
+      platform,
+      setupInstructions: getSetupInstructions(platform, config)
+    };
+  }
+
   try {
-    await execAsync(`${sshPrefix} "echo connected"`, { timeout: 10000 });
-    return { connected: true, keyPath };
+    await execSshCommand(config, 'echo connected', platform, 10000);
+    return { connected: true, keyPath: keyCheck.path, platform };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : 'Connection failed';
+
     // Provide more helpful error messages
+    let userError = errorMsg;
     if (errorMsg.includes('Permission denied')) {
-      return {
-        connected: false,
-        error: `SSH authentication failed. The key at ${keyPath} may not be authorized on the VPS. Run: ssh-copy-id -i ${keyPath} ${config.user}@${config.host}`,
-        keyPath
-      };
+      userError = `SSH authentication failed. The key at ${keyCheck.path} may not be authorized on the VPS. You need to copy your public key to the server.`;
+    } else if (errorMsg.includes('Connection refused') || errorMsg.includes('Connection timed out') || errorMsg.includes('ETIMEDOUT')) {
+      userError = `Cannot reach VPS at ${config.host}. Check that the server is running and accessible.`;
+    } else if (errorMsg.includes('Host key verification failed')) {
+      userError = `Host key verification failed. The VPS host key may have changed. On Windows, you can fix this by running: ssh-keygen -R ${config.host}`;
     }
-    if (errorMsg.includes('Connection refused') || errorMsg.includes('Connection timed out')) {
-      return {
-        connected: false,
-        error: `Cannot reach VPS at ${config.host}. Check that the server is running and accessible.`,
-        keyPath
-      };
-    }
-    return { connected: false, error: errorMsg, keyPath };
+
+    return {
+      connected: false,
+      error: userError,
+      keyPath: keyCheck.path,
+      platform,
+      setupInstructions: getSetupInstructions(platform, config)
+    };
   }
 }
 
 function startRsyncProcess(
   config: typeof DEFAULT_VPS_CONFIG,
   direction: 'push' | 'pull' | 'bidirectional',
-  sessionId: string
+  sessionId: string,
+  platform: PlatformInfo
 ): void {
   syncProgress = {
     sessionId,
@@ -272,7 +301,10 @@ function startRsyncProcess(
     currentFile: '',
     startedAt: new Date().toISOString(),
     lastUpdate: new Date().toISOString(),
-    logs: [{ timestamp: new Date().toISOString(), message: `Starting ${direction} sync...` }]
+    logs: [
+      { timestamp: new Date().toISOString(), message: `Starting ${direction} sync...` },
+      { timestamp: new Date().toISOString(), message: `Platform: ${platform.os} | rsync: ${platform.rsyncPath || 'not found'}` }
+    ]
   };
   pauseRequested = false;
 
@@ -288,114 +320,107 @@ function startRsyncProcess(
         message: `Starting ${phase} sync...`
       });
 
-      const localPath = path.join(process.cwd(), 'public', phase) + '/';
-      const remotePath = `${config.user}@${config.host}:${config.remotePath}/${phase}/`;
-      const keyPath = expandPath(config.sshKeyPath);
-      const sshCmd = `ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i "${keyPath}"`;
+      const localPath = path.join(process.cwd(), 'public', phase) + (platform.isWindows ? '\\' : '/');
 
-      let rsyncArgs: string[];
-      if (direction === 'push') {
-        rsyncArgs = ['-avz', '-e', sshCmd, '--progress', '--itemize-changes', localPath, remotePath];
-      } else if (direction === 'pull') {
-        rsyncArgs = ['-avz', '-e', sshCmd, '--progress', '--itemize-changes', remotePath, localPath];
-      } else {
-        // Bidirectional: pull first, then push
-        rsyncArgs = ['-avzu', '-e', sshCmd, '--progress', '--itemize-changes', remotePath, localPath];
-      }
+      // Build rsync command based on direction
+      const rsyncConfig = {
+        ...config,
+        remotePath: `${config.remotePath}/${phase}/`
+      };
 
-      await new Promise<void>((resolve, reject) => {
-        activeSyncProcess = spawn('rsync', rsyncArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+      // For bidirectional, pull first then push
+      const directions: Array<'push' | 'pull'> = direction === 'bidirectional'
+        ? ['pull', 'push']
+        : [direction];
 
-        let outputBuffer = '';
+      for (const dir of directions) {
+        if (pauseRequested || !syncProgress) break;
 
-        activeSyncProcess.stdout?.on('data', (data: Buffer) => {
-          const text = data.toString();
-          outputBuffer += text;
+        const { command, args } = buildRsyncArgs(
+          rsyncConfig,
+          localPath,
+          dir,
+          platform,
+          { update: direction === 'bidirectional' }
+        );
 
-          // Parse rsync progress output
-          const lines = outputBuffer.split('\n');
-          outputBuffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (line.trim()) {
-              // Parse file transfer info
-              const fileMatch = line.match(/^[<>]f[+.].+\s+(.+)$/);
-              if (fileMatch) {
-                syncProgress!.currentFile = fileMatch[1];
-                syncProgress!.transferredFiles++;
-              }
-
-              // Parse progress percentage
-              const progressMatch = line.match(/(\d+)%/);
-              if (progressMatch && syncProgress) {
-                syncProgress.lastUpdate = new Date().toISOString();
-              }
-
-              // Parse bytes transferred
-              const bytesMatch = line.match(/(\d+(?:,\d{3})*)\s+(\d+)%/);
-              if (bytesMatch && syncProgress) {
-                syncProgress.transferredBytes = parseInt(bytesMatch[1].replace(/,/g, ''));
-              }
-            }
-          }
+        syncProgress.logs.push({
+          timestamp: new Date().toISOString(),
+          message: `Running: ${command} ${args.slice(0, 3).join(' ')} ...`
         });
 
-        activeSyncProcess.stderr?.on('data', (data: Buffer) => {
-          const error = data.toString();
-          syncProgress?.logs.push({
-            timestamp: new Date().toISOString(),
-            message: `Error: ${error.trim()}`
-          });
-        });
-
-        activeSyncProcess.on('close', (code) => {
-          if (code === 0) {
-            syncProgress?.logs.push({
-              timestamp: new Date().toISOString(),
-              message: `${phase} sync completed successfully`
-            });
-            resolve();
-          } else if (code === null && pauseRequested) {
-            resolve();
-          } else {
-            reject(new Error(`rsync exited with code ${code}`));
-          }
-        });
-
-        activeSyncProcess.on('error', (error) => {
-          reject(error);
-        });
-      });
-
-      // For bidirectional, also push after pull
-      if (direction === 'bidirectional' && !pauseRequested) {
-        const pushArgs = ['-avzu', '-e', sshCmd, '--progress', '--itemize-changes', localPath, remotePath];
         await new Promise<void>((resolve, reject) => {
-          activeSyncProcess = spawn('rsync', pushArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+          // On Windows, we may need to spawn differently
+          const spawnOptions: { stdio: ['ignore', 'pipe', 'pipe']; shell?: boolean } = {
+            stdio: ['ignore', 'pipe', 'pipe']
+          };
+
+          // If rsync is from Git Bash or MSYS, we might need shell
+          if (platform.isWindows && command.includes('Git')) {
+            spawnOptions.shell = true;
+          }
+
+          activeSyncProcess = spawn(command, args, spawnOptions);
+
+          let outputBuffer = '';
 
           activeSyncProcess.stdout?.on('data', (data: Buffer) => {
             const text = data.toString();
-            const lines = text.split('\n');
+            outputBuffer += text;
+
+            // Parse rsync progress output
+            const lines = outputBuffer.split('\n');
+            outputBuffer = lines.pop() || '';
+
             for (const line of lines) {
               if (line.trim()) {
+                // Parse file transfer info
                 const fileMatch = line.match(/^[<>]f[+.].+\s+(.+)$/);
-                if (fileMatch && syncProgress) {
-                  syncProgress.currentFile = fileMatch[1];
-                  syncProgress.transferredFiles++;
+                if (fileMatch) {
+                  syncProgress!.currentFile = fileMatch[1];
+                  syncProgress!.transferredFiles++;
+                }
+
+                // Parse progress percentage
+                const progressMatch = line.match(/(\d+)%/);
+                if (progressMatch && syncProgress) {
+                  syncProgress.lastUpdate = new Date().toISOString();
+                }
+
+                // Parse bytes transferred
+                const bytesMatch = line.match(/(\d+(?:,\d{3})*)\s+(\d+)%/);
+                if (bytesMatch && syncProgress) {
+                  syncProgress.transferredBytes = parseInt(bytesMatch[1].replace(/,/g, ''));
                 }
               }
             }
           });
 
+          activeSyncProcess.stderr?.on('data', (data: Buffer) => {
+            const error = data.toString();
+            syncProgress?.logs.push({
+              timestamp: new Date().toISOString(),
+              message: `Error: ${error.trim()}`
+            });
+          });
+
           activeSyncProcess.on('close', (code) => {
-            if (code === 0 || (code === null && pauseRequested)) {
+            if (code === 0) {
+              syncProgress?.logs.push({
+                timestamp: new Date().toISOString(),
+                message: `${phase} ${dir} completed successfully`
+              });
+              resolve();
+            } else if (code === null && pauseRequested) {
               resolve();
             } else {
-              reject(new Error(`rsync push exited with code ${code}`));
+              reject(new Error(`rsync exited with code ${code}`));
             }
           });
 
-          activeSyncProcess.on('error', reject);
+          activeSyncProcess.on('error', (error) => {
+            reject(error);
+          });
         });
       }
     }
@@ -449,6 +474,9 @@ export async function GET(request: NextRequest) {
     sshKeyPath: searchParams.get('sshKey') || DEFAULT_VPS_CONFIG.sshKeyPath
   };
 
+  // Detect platform
+  const platform = await detectPlatform();
+
   try {
     switch (action) {
       case 'status': {
@@ -456,53 +484,65 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({
           isActive: activeSyncProcess !== null,
           progress: syncProgress,
-          defaultConfig: DEFAULT_VPS_CONFIG
+          defaultConfig: DEFAULT_VPS_CONFIG,
+          platform
         });
       }
 
       case 'test-connection': {
-        const result = await testVpsConnection(config);
+        const result = await testVpsConnection(config, platform);
         return NextResponse.json(result);
       }
 
       case 'local-stats': {
         const stats = await getLocalStats();
-        return NextResponse.json({ stats });
+        return NextResponse.json({ stats, platform });
       }
 
       case 'vps-stats': {
-        const stats = await getVpsStats(config);
+        const stats = await getVpsStats(config, platform);
         if (!stats) {
-          return NextResponse.json({ error: 'Failed to connect to VPS' }, { status: 500 });
+          return NextResponse.json({ error: 'Failed to connect to VPS', platform }, { status: 500 });
         }
-        return NextResponse.json({ stats });
+        return NextResponse.json({ stats, platform });
       }
 
       case 'compare': {
         const [localStats, vpsStats, discrepancies] = await Promise.all([
           getLocalStats(),
-          getVpsStats(config),
-          getDiscrepancies(config)
+          getVpsStats(config, platform),
+          getDiscrepancies(config, platform)
         ]);
 
         return NextResponse.json({
           local: localStats,
           vps: vpsStats,
           discrepancies,
-          isInSync: discrepancies.total.localOnly === 0 && discrepancies.total.vpsOnly === 0
+          isInSync: discrepancies.total.localOnly === 0 && discrepancies.total.vpsOnly === 0,
+          platform
         });
       }
 
       case 'discrepancies': {
-        const discrepancies = await getDiscrepancies(config);
-        return NextResponse.json(discrepancies);
+        const discrepancies = await getDiscrepancies(config, platform);
+        return NextResponse.json({ ...discrepancies, platform });
+      }
+
+      case 'platform': {
+        // Force re-detect platform (useful after installing tools)
+        clearPlatformCache();
+        const freshPlatform = await detectPlatform();
+        return NextResponse.json({
+          platform: freshPlatform,
+          setupInstructions: getSetupInstructions(freshPlatform, config)
+        });
       }
 
       default:
         // Default: return full status and stats
         const [localStats, vpsStats] = await Promise.all([
           getLocalStats(),
-          getVpsStats(config)
+          getVpsStats(config, platform)
         ]);
 
         return NextResponse.json({
@@ -510,13 +550,17 @@ export async function GET(request: NextRequest) {
           progress: syncProgress,
           local: localStats,
           vps: vpsStats,
-          config: DEFAULT_VPS_CONFIG
+          config: DEFAULT_VPS_CONFIG,
+          platform
         });
     }
   } catch (error) {
     console.error('Sync API error:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to process request' },
+      {
+        error: error instanceof Error ? error.message : 'Failed to process request',
+        platform
+      },
       { status: 500 }
     );
   }
@@ -527,6 +571,9 @@ export async function POST(request: NextRequest) {
   if (!authHeader || authHeader !== `Bearer ${process.env.ADMIN_PASSWORD}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+
+  // Detect platform
+  const platform = await detectPlatform();
 
   try {
     const body = await request.json();
@@ -553,23 +600,43 @@ export async function POST(request: NextRequest) {
           );
         }
 
+        // Check if rsync is available
+        if (!platform.hasRsync) {
+          const instructions = getSetupInstructions(platform, config);
+          return NextResponse.json(
+            {
+              error: platform.isWindows
+                ? 'rsync is not installed on this Windows system. Please install Git for Windows (which includes rsync) or cwRsync.'
+                : 'rsync is not installed. Please install it using your package manager.',
+              platform,
+              setupInstructions: instructions
+            },
+            { status: 400 }
+          );
+        }
+
         // Test connection first
-        const connectionTest = await testVpsConnection(config);
+        const connectionTest = await testVpsConnection(config, platform);
         if (!connectionTest.connected) {
           return NextResponse.json(
-            { error: `Cannot connect to VPS: ${connectionTest.error}` },
+            {
+              error: `Cannot connect to VPS: ${connectionTest.error}`,
+              platform,
+              setupInstructions: connectionTest.setupInstructions
+            },
             { status: 400 }
           );
         }
 
         const sessionId = `sync_${Date.now()}`;
         syncSessionId = sessionId;
-        startRsyncProcess(config, direction, sessionId);
+        startRsyncProcess(config, direction, sessionId, platform);
 
         return NextResponse.json({
           message: 'Sync started',
           sessionId,
-          direction
+          direction,
+          platform
         });
       }
 
@@ -582,7 +649,12 @@ export async function POST(request: NextRequest) {
         }
 
         pauseRequested = true;
-        activeSyncProcess.kill('SIGTERM');
+        // On Windows, SIGTERM might not work the same way
+        if (platform.isWindows) {
+          activeSyncProcess.kill();
+        } else {
+          activeSyncProcess.kill('SIGTERM');
+        }
 
         return NextResponse.json({
           message: 'Pause requested',
@@ -598,7 +670,12 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        activeSyncProcess.kill('SIGKILL');
+        // On Windows, just kill; on Unix, use SIGKILL
+        if (platform.isWindows) {
+          activeSyncProcess.kill();
+        } else {
+          activeSyncProcess.kill('SIGKILL');
+        }
         activeSyncProcess = null;
 
         if (syncProgress) {
@@ -624,6 +701,16 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ message: 'Session cleared' });
       }
 
+      case 'refresh-platform': {
+        // Force refresh platform detection
+        clearPlatformCache();
+        const freshPlatform = await detectPlatform();
+        return NextResponse.json({
+          message: 'Platform detection refreshed',
+          platform: freshPlatform
+        });
+      }
+
       default:
         return NextResponse.json(
           { error: 'Invalid action' },
@@ -633,7 +720,10 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Sync API error:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to process request' },
+      {
+        error: error instanceof Error ? error.message : 'Failed to process request',
+        platform
+      },
       { status: 500 }
     );
   }
