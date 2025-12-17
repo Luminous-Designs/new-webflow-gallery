@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { supabase } from '@/lib/supabase';
 import { promises as fs } from 'fs';
 import path from 'path';
 import axios from 'axios';
@@ -92,20 +92,27 @@ interface FreshScrapeScreenshot {
 
 // Helper to check for active fresh scrape
 async function getActiveFreshScrape(): Promise<FreshScrapeState | null> {
-  const state = await db.getAsync<FreshScrapeState>(
-    `SELECT * FROM fresh_scrape_state
-     WHERE status IN ('deleting', 'scraping_featured', 'scraping_regular', 'paused')
-     ORDER BY created_at DESC LIMIT 1`
-  );
-  return state || null;
+  const { data } = await supabase
+    .from('fresh_scrape_state')
+    .select('*')
+    .in('status', ['deleting', 'scraping_featured', 'scraping_regular', 'paused'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  return data;
 }
 
 // Helper to get latest fresh scrape state
 async function getLatestFreshScrape(): Promise<FreshScrapeState | null> {
-  const state = await db.getAsync<FreshScrapeState>(
-    `SELECT * FROM fresh_scrape_state ORDER BY created_at DESC LIMIT 1`
-  );
-  return state || null;
+  const { data } = await supabase
+    .from('fresh_scrape_state')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  return data;
 }
 
 async function getLastScreenshotForScrape(stateId: number): Promise<{
@@ -115,19 +122,14 @@ async function getLastScreenshotForScrape(stateId: number): Promise<{
   screenshot_path: string | null;
   captured_at: string;
 } | null> {
-  const row = await db.getAsync<{
-    template_name: string | null;
-    template_slug: string | null;
-    screenshot_thumbnail_path: string | null;
-    captured_at: string;
-  }>(
-    `SELECT template_name, template_slug, screenshot_thumbnail_path, captured_at
-     FROM fresh_scrape_screenshots
-     WHERE fresh_scrape_id = ?
-     ORDER BY captured_at DESC
-     LIMIT 1`,
-    [stateId]
-  );
+  const { data: row } = await supabase
+    .from('fresh_scrape_screenshots')
+    .select('template_name, template_slug, screenshot_thumbnail_path, captured_at')
+    .eq('fresh_scrape_id', stateId)
+    .order('captured_at', { ascending: false })
+    .limit(1)
+    .single();
+
   if (!row) return null;
   return {
     ...row,
@@ -158,50 +160,71 @@ async function deleteAllData(): Promise<{ templatesDeleted: number; screenshotsD
   let thumbnailsDeleted = 0;
 
   // Count templates before deletion
-  const countResult = await db.getAsync<{ count: number }>('SELECT COUNT(*) as count FROM templates');
-  templatesDeleted = countResult?.count || 0;
+  const { count } = await supabase
+    .from('templates')
+    .select('*', { count: 'exact', head: true });
+  templatesDeleted = count || 0;
 
   // Clear visitor's template references first (foreign key to templates)
-  await db.runAsync('UPDATE visitors SET selected_template_id = NULL');
+  await supabase
+    .from('visitors')
+    .update({ selected_template_id: null })
+    .not('selected_template_id', 'is', null);
 
   // Clear purchases template references (but keep purchase records)
-  // Note: purchases has FK to templates, need to handle this
-  await db.runAsync('DELETE FROM purchases WHERE template_id IS NOT NULL');
+  await supabase
+    .from('purchases')
+    .delete()
+    .not('template_id', 'is', null);
 
   // Delete preview_metrics (has FK to templates)
-  await db.runAsync('DELETE FROM preview_metrics');
+  await supabase.from('preview_metrics').delete().neq('id', 0);
 
   // Delete thumbnail_jobs (has FK to templates)
-  await db.runAsync('DELETE FROM thumbnail_jobs');
+  await supabase.from('thumbnail_jobs').delete().neq('id', 0);
 
   // Delete ultra_featured_templates (has FK to templates)
-  await db.runAsync('DELETE FROM ultra_featured_templates');
+  await supabase.from('ultra_featured_templates').delete().neq('id', 0);
 
   // Delete junction tables (have FK to templates)
-  await db.runAsync('DELETE FROM template_features');
-  await db.runAsync('DELETE FROM template_styles');
-  await db.runAsync('DELETE FROM template_subcategories');
+  await supabase.from('template_features').delete().neq('template_id', 0);
+  await supabase.from('template_styles').delete().neq('template_id', 0);
+  await supabase.from('template_subcategories').delete().neq('template_id', 0);
 
   // Now delete templates
-  await db.runAsync('DELETE FROM templates');
+  await supabase.from('templates').delete().neq('id', 0);
 
   // Clean up orphaned metadata
-  await db.runAsync('DELETE FROM features');
-  await db.runAsync('DELETE FROM styles');
-  await db.runAsync('DELETE FROM subcategories');
+  await supabase.from('features').delete().neq('id', 0);
+  await supabase.from('styles').delete().neq('id', 0);
+  await supabase.from('subcategories').delete().neq('id', 0);
 
   // Reset batch scraping tables (respect FK order: children first)
-  await db.runAsync('DELETE FROM batch_templates');
-  await db.runAsync('DELETE FROM session_resume_points');
-  await db.runAsync('DELETE FROM scrape_batches');
-  await db.runAsync('DELETE FROM scrape_sessions');
+  await supabase.from('batch_templates').delete().neq('id', 0);
+  await supabase.from('session_resume_points').delete().neq('id', 0);
+  await supabase.from('scrape_batches').delete().neq('id', 0);
+  await supabase.from('scrape_sessions').delete().neq('id', 0);
 
   // Reset legacy scrape jobs (respect FK order)
-  await db.runAsync('DELETE FROM scrape_logs');
-  await db.runAsync('DELETE FROM scrape_jobs');
+  await supabase.from('scrape_logs').delete().neq('id', 0);
+  await supabase.from('scrape_jobs').delete().neq('id', 0);
 
   // Clear old fresh scrape screenshots (but keep current state)
-  await db.runAsync('DELETE FROM fresh_scrape_screenshots WHERE fresh_scrape_id NOT IN (SELECT id FROM fresh_scrape_state WHERE status IN ("deleting", "scraping_featured", "scraping_regular", "paused"))');
+  const { data: activeStates } = await supabase
+    .from('fresh_scrape_state')
+    .select('id')
+    .in('status', ['deleting', 'scraping_featured', 'scraping_regular', 'paused']);
+
+  const activeIds = activeStates?.map(s => s.id) || [];
+
+  if (activeIds.length > 0) {
+    await supabase
+      .from('fresh_scrape_screenshots')
+      .delete()
+      .not('fresh_scrape_id', 'in', `(${activeIds.join(',')})`);
+  } else {
+    await supabase.from('fresh_scrape_screenshots').delete().neq('id', 0);
+  }
 
   // Delete screenshot files
   const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
@@ -230,9 +253,6 @@ async function deleteAllData(): Promise<{ templatesDeleted: number; screenshotsD
   } catch {
     // Directory may not exist
   }
-
-  // Vacuum database
-  await db.runAsync('VACUUM');
 
   return { templatesDeleted, screenshotsDeleted, thumbnailsDeleted };
 }
@@ -266,10 +286,12 @@ export async function POST(request: NextRequest) {
         }
 
         // Get featured authors
-        const featuredAuthors = await db.allAsync<{ author_id: string }>(
-          'SELECT author_id FROM featured_authors WHERE is_active = 1'
-        );
-        const featuredAuthorIds = featuredAuthors.map(a => a.author_id);
+        const { data: featuredAuthors } = await supabase
+          .from('featured_authors')
+          .select('author_id')
+          .eq('is_active', true);
+
+        const featuredAuthorIds = (featuredAuthors || []).map(a => a.author_id);
 
         // Create initial config (sanitized/clamped)
         const baseConfig: FreshScrapeConfig = {
@@ -295,17 +317,19 @@ export async function POST(request: NextRequest) {
         };
 
         // Create fresh scrape state
-        const { lastID } = await db.runAsync(
-          `INSERT INTO fresh_scrape_state (
-            status, phase, featured_author_ids, config, started_at
-          ) VALUES (?, ?, ?, ?, datetime('now'))`,
-          ['deleting', 'deletion', JSON.stringify(featuredAuthorIds), JSON.stringify(defaultConfig)]
-        );
+        const { data: state, error: insertError } = await supabase
+          .from('fresh_scrape_state')
+          .insert({
+            status: 'deleting',
+            phase: 'deletion',
+            featured_author_ids: JSON.stringify(featuredAuthorIds),
+            config: JSON.stringify(defaultConfig),
+            started_at: new Date().toISOString()
+          })
+          .select()
+          .single();
 
-        const state = await db.getAsync<FreshScrapeState>(
-          'SELECT * FROM fresh_scrape_state WHERE id = ?',
-          [lastID]
-        );
+        if (insertError) throw insertError;
 
         return NextResponse.json({
           message: 'Fresh scrape started',
@@ -328,14 +352,14 @@ export async function POST(request: NextRequest) {
         const deletionResult = await deleteAllData();
 
         // Update state to discovery phase
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET
-            phase = 'discovery',
-            deletion_completed_at = datetime('now'),
-            updated_at = datetime('now')
-          WHERE id = ?`,
-          [state.id]
-        );
+        await supabase
+          .from('fresh_scrape_state')
+          .update({
+            phase: 'discovery',
+            deletion_completed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', state.id);
 
         return NextResponse.json({
           message: 'Deletion complete, starting discovery',
@@ -364,22 +388,19 @@ export async function POST(request: NextRequest) {
         // until we scrape them. So we'll just set all URLs and handle prioritization during scraping.
         // The scraper will identify featured author templates as it processes them.
 
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET
-            total_sitemap_count = ?,
-            regular_template_urls = ?,
-            regular_total = ?,
-            phase = 'featured_scrape',
-            status = 'scraping_featured',
-            updated_at = datetime('now')
-          WHERE id = ?`,
-          [allUrls.length, JSON.stringify(allUrls), allUrls.length, state.id]
-        );
-
-        const updatedState = await db.getAsync<FreshScrapeState>(
-          'SELECT * FROM fresh_scrape_state WHERE id = ?',
-          [state.id]
-        );
+        const { data: updatedState } = await supabase
+          .from('fresh_scrape_state')
+          .update({
+            total_sitemap_count: allUrls.length,
+            regular_template_urls: JSON.stringify(allUrls),
+            regular_total: allUrls.length,
+            phase: 'featured_scrape',
+            status: 'scraping_featured',
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', state.id)
+          .select()
+          .single();
 
         return NextResponse.json({
           message: 'Discovery complete',
@@ -400,8 +421,10 @@ export async function POST(request: NextRequest) {
 
         const sitemapUrls = await fetchSitemapUrls();
 
-        const existingSlugs = await db.allAsync<{ slug: string }>('SELECT slug FROM templates');
-        const existingSlugSet = new Set(existingSlugs.map(r => r.slug));
+        const { data: existingSlugs } = await supabase
+          .from('templates')
+          .select('slug');
+        const existingSlugSet = new Set((existingSlugs || []).map(r => r.slug));
 
         const missingTemplates = sitemapUrls
           .map(url => {
@@ -442,8 +465,10 @@ export async function POST(request: NextRequest) {
         } else {
           // Default behavior: compute missing templates from sitemap vs DB.
           const sitemapUrls = await fetchSitemapUrls();
-          const existingSlugs = await db.allAsync<{ slug: string }>('SELECT slug FROM templates');
-          const existingSlugSet = new Set(existingSlugs.map(r => r.slug));
+          const { data: existingSlugs } = await supabase
+            .from('templates')
+            .select('slug');
+          const existingSlugSet = new Set((existingSlugs || []).map(r => r.slug));
           urlsToScrape = sitemapUrls.filter(url => {
             const slug = url.split('/').filter(Boolean).pop() || '';
             return slug && !existingSlugSet.has(slug);
@@ -481,26 +506,21 @@ export async function POST(request: NextRequest) {
 
         const sitemapCount = typeof body.totalSitemapCount === 'number' ? body.totalSitemapCount : 0;
 
-        const { lastID } = await db.runAsync(
-          `INSERT INTO fresh_scrape_state (
-            status, phase, total_sitemap_count,
-            regular_template_urls, regular_total,
-            config, started_at
-          ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
-          [
-            'scraping_regular',
-            'regular_scrape',
-            sitemapCount,
-            JSON.stringify(urlsToScrape),
-            urlsToScrape.length,
-            JSON.stringify(updateConfig)
-          ]
-        );
+        const { data: state, error: insertError } = await supabase
+          .from('fresh_scrape_state')
+          .insert({
+            status: 'scraping_regular',
+            phase: 'regular_scrape',
+            total_sitemap_count: sitemapCount,
+            regular_template_urls: JSON.stringify(urlsToScrape),
+            regular_total: urlsToScrape.length,
+            config: JSON.stringify(updateConfig),
+            started_at: new Date().toISOString()
+          })
+          .select()
+          .single();
 
-        const state = await db.getAsync<FreshScrapeState>(
-          'SELECT * FROM fresh_scrape_state WHERE id = ?',
-          [lastID]
-        );
+        if (insertError) throw insertError;
 
         return NextResponse.json({
           message: 'Update scrape started',
@@ -559,13 +579,13 @@ export async function POST(request: NextRequest) {
           ...(config ? (clampFreshScraperConfig(config) as Partial<FreshScrapeConfig>) : {})
         };
 
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET
-            config = ?,
-            updated_at = datetime('now')
-          WHERE id = ?`,
-          [JSON.stringify(newConfig), state.id]
-        );
+        await supabase
+          .from('fresh_scrape_state')
+          .update({
+            config: JSON.stringify(newConfig),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', state.id);
 
         return NextResponse.json({
           message: 'Config updated',
@@ -582,22 +602,26 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET
-            status = 'paused',
-            paused_at = datetime('now'),
-            updated_at = datetime('now')
-          WHERE id = ?`,
-          [state.id]
-        );
+        await supabase
+          .from('fresh_scrape_state')
+          .update({
+            status: 'paused',
+            paused_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', state.id);
 
         return NextResponse.json({ message: 'Scrape paused' });
       }
 
       case 'resume': {
-        const state = await db.getAsync<FreshScrapeState>(
-          `SELECT * FROM fresh_scrape_state WHERE status = 'paused' ORDER BY created_at DESC LIMIT 1`
-        );
+        const { data: state } = await supabase
+          .from('fresh_scrape_state')
+          .select('*')
+          .eq('status', 'paused')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
 
         if (!state) {
           return NextResponse.json(
@@ -612,19 +636,16 @@ export async function POST(request: NextRequest) {
           newStatus = 'scraping_featured';
         }
 
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET
-            status = ?,
-            resumed_at = datetime('now'),
-            updated_at = datetime('now')
-          WHERE id = ?`,
-          [newStatus, state.id]
-        );
-
-        const updatedState = await db.getAsync<FreshScrapeState>(
-          'SELECT * FROM fresh_scrape_state WHERE id = ?',
-          [state.id]
-        );
+        const { data: updatedState } = await supabase
+          .from('fresh_scrape_state')
+          .update({
+            status: newStatus,
+            resumed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', state.id)
+          .select()
+          .single();
 
         return NextResponse.json({
           message: 'Scrape resumed',
@@ -641,15 +662,15 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET
-            status = 'failed',
-            last_error = 'Cancelled by user',
-            completed_at = datetime('now'),
-            updated_at = datetime('now')
-          WHERE id = ?`,
-          [state.id]
-        );
+        await supabase
+          .from('fresh_scrape_state')
+          .update({
+            status: 'failed',
+            last_error: 'Cancelled by user',
+            completed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', state.id);
 
         return NextResponse.json({ message: 'Scrape cancelled' });
       }
@@ -669,62 +690,54 @@ export async function POST(request: NextRequest) {
           ? (body.currentBatchUrls as unknown[]).filter((u): u is string => typeof u === 'string')
           : undefined;
 
-        const state = await db.getAsync<FreshScrapeState>(
-          'SELECT * FROM fresh_scrape_state WHERE id = ?',
-          [stateId]
-        );
+        const { data: state } = await supabase
+          .from('fresh_scrape_state')
+          .select('*')
+          .eq('id', stateId)
+          .single();
 
         if (!state) {
           return NextResponse.json({ error: 'State not found' }, { status: 404 });
         }
 
-        const updates: string[] = ['updated_at = datetime("now")'];
-        const params: (string | number)[] = [];
+        const updateData: Record<string, unknown> = {
+          updated_at: new Date().toISOString()
+        };
 
         if (isFeatured) {
           if (processed !== undefined) {
-            updates.push('featured_processed = ?');
-            params.push(processed);
+            updateData.featured_processed = processed;
           }
           if (successful !== undefined) {
-            updates.push('featured_successful = ?');
-            params.push(successful);
+            updateData.featured_successful = successful;
           }
           if (failed !== undefined) {
-            updates.push('featured_failed = ?');
-            params.push(failed);
+            updateData.featured_failed = failed;
           }
         } else {
           if (processed !== undefined) {
-            updates.push('regular_processed = ?');
-            params.push(processed);
+            updateData.regular_processed = processed;
           }
           if (successful !== undefined) {
-            updates.push('regular_successful = ?');
-            params.push(successful);
+            updateData.regular_successful = successful;
           }
           if (failed !== undefined) {
-            updates.push('regular_failed = ?');
-            params.push(failed);
+            updateData.regular_failed = failed;
           }
         }
 
         if (batchIndex !== undefined) {
-          updates.push('current_batch_index = ?');
-          params.push(batchIndex);
+          updateData.current_batch_index = batchIndex;
         }
 
         if (currentBatchUrls !== undefined) {
-          updates.push('current_batch_urls = ?');
-          params.push(JSON.stringify(currentBatchUrls));
+          updateData.current_batch_urls = JSON.stringify(currentBatchUrls);
         }
 
-        params.push(stateId);
-
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET ${updates.join(', ')} WHERE id = ?`,
-          params
-        );
+        await supabase
+          .from('fresh_scrape_state')
+          .update(updateData)
+          .eq('id', stateId);
 
         return NextResponse.json({ message: 'Progress updated' });
       }
@@ -736,16 +749,16 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: 'stateId required' }, { status: 400 });
         }
 
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET
-            phase = 'regular_scrape',
-            status = 'scraping_regular',
-            featured_completed_at = datetime('now'),
-            current_batch_index = 0,
-            updated_at = datetime('now')
-          WHERE id = ?`,
-          [stateId]
-        );
+        await supabase
+          .from('fresh_scrape_state')
+          .update({
+            phase: 'regular_scrape',
+            status: 'scraping_regular',
+            featured_completed_at: new Date().toISOString(),
+            current_batch_index: 0,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', stateId);
 
         return NextResponse.json({ message: 'Featured scraping complete' });
       }
@@ -757,15 +770,15 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: 'stateId required' }, { status: 400 });
         }
 
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET
-            status = 'completed',
-            phase = 'completed',
-            completed_at = datetime('now'),
-            updated_at = datetime('now')
-          WHERE id = ?`,
-          [stateId]
-        );
+        await supabase
+          .from('fresh_scrape_state')
+          .update({
+            status: 'completed',
+            phase: 'completed',
+            completed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', stateId);
 
         return NextResponse.json({ message: 'Fresh scrape completed' });
       }
@@ -781,12 +794,15 @@ export async function POST(request: NextRequest) {
         const thumbnailPath = typeof body.thumbnailPath === 'string' ? body.thumbnailPath : null;
         const isFeaturedAuthor = body.isFeaturedAuthor === true;
 
-        await db.runAsync(
-          `INSERT INTO fresh_scrape_screenshots
-            (fresh_scrape_id, template_name, template_slug, screenshot_thumbnail_path, is_featured_author)
-          VALUES (?, ?, ?, ?, ?)`,
-          [stateId, templateName, templateSlug, thumbnailPath, isFeaturedAuthor ? 1 : 0]
-        );
+        await supabase
+          .from('fresh_scrape_screenshots')
+          .insert({
+            fresh_scrape_id: stateId,
+            template_name: templateName,
+            template_slug: templateSlug,
+            screenshot_thumbnail_path: thumbnailPath,
+            is_featured_author: isFeaturedAuthor
+          });
 
         return NextResponse.json({ message: 'Screenshot added' });
       }
@@ -797,16 +813,23 @@ export async function POST(request: NextRequest) {
         if (!Number.isFinite(stateId)) {
           return NextResponse.json({ error: 'stateId required' }, { status: 400 });
         }
-        const error = typeof body.error === 'string' ? body.error : 'Unknown error';
+        const errorMsg = typeof body.error === 'string' ? body.error : 'Unknown error';
 
-        await db.runAsync(
-          `UPDATE fresh_scrape_state SET
-            last_error = ?,
-            error_count = error_count + 1,
-            updated_at = datetime('now')
-          WHERE id = ?`,
-          [error, stateId]
-        );
+        // First get current error_count
+        const { data: currentState } = await supabase
+          .from('fresh_scrape_state')
+          .select('error_count')
+          .eq('id', stateId)
+          .single();
+
+        await supabase
+          .from('fresh_scrape_state')
+          .update({
+            last_error: errorMsg,
+            error_count: (currentState?.error_count || 0) + 1,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', stateId);
 
         return NextResponse.json({ message: 'Error recorded' });
       }
@@ -841,9 +864,13 @@ export async function GET(request: NextRequest) {
         const latest = await getLatestFreshScrape();
 
         // Check if there's a paused scrape that can be resumed
-        const paused = await db.getAsync<FreshScrapeState>(
-          `SELECT * FROM fresh_scrape_state WHERE status = 'paused' ORDER BY created_at DESC LIMIT 1`
-        );
+        const { data: paused } = await supabase
+          .from('fresh_scrape_state')
+          .select('*')
+          .eq('status', 'paused')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
 
         const [pausedLastScreenshot, activeLastScreenshot] = await Promise.all([
           paused?.id ? getLastScreenshotForScrape(paused.id) : Promise.resolve(null),
@@ -867,10 +894,11 @@ export async function GET(request: NextRequest) {
           return NextResponse.json({ error: 'stateId required' }, { status: 400 });
         }
 
-        const state = await db.getAsync<FreshScrapeState>(
-          'SELECT * FROM fresh_scrape_state WHERE id = ?',
-          [stateId]
-        );
+        const { data: state } = await supabase
+          .from('fresh_scrape_state')
+          .select('*')
+          .eq('id', stateId)
+          .single();
 
         if (!state) {
           return NextResponse.json({ error: 'State not found' }, { status: 404 });
@@ -921,45 +949,49 @@ export async function GET(request: NextRequest) {
           return NextResponse.json({ error: 'stateId required' }, { status: 400 });
         }
 
-        const screenshots = await db.allAsync<FreshScrapeScreenshot>(
-          `SELECT * FROM fresh_scrape_screenshots
-           WHERE fresh_scrape_id = ?
-           ORDER BY captured_at DESC
-           LIMIT ? OFFSET ?`,
-          [stateId, limit, offset]
-        );
+        const { data: screenshots } = await supabase
+          .from('fresh_scrape_screenshots')
+          .select('*')
+          .eq('fresh_scrape_id', stateId)
+          .order('captured_at', { ascending: false })
+          .range(offset, offset + limit - 1);
 
-        const screenshotsWithPaths = screenshots.map(s => ({
+        const screenshotsWithPaths = (screenshots || []).map(s => ({
           ...s,
           screenshot_path: s.template_slug ? `/screenshots/${s.template_slug}.webp` : null
         }));
 
-        const totalCount = await db.getAsync<{ count: number }>(
-          'SELECT COUNT(*) as count FROM fresh_scrape_screenshots WHERE fresh_scrape_id = ?',
-          [stateId]
-        );
+        const { count: totalCount } = await supabase
+          .from('fresh_scrape_screenshots')
+          .select('*', { count: 'exact', head: true })
+          .eq('fresh_scrape_id', stateId);
 
         return NextResponse.json({
           screenshots: screenshotsWithPaths,
-          total: totalCount?.count || 0,
-          hasMore: (totalCount?.count || 0) > offset + limit
+          total: totalCount || 0,
+          hasMore: (totalCount || 0) > offset + limit
         });
       }
 
       case 'featured_authors': {
-        const authors = await db.allAsync<{ author_id: string; author_name: string }>(
-          'SELECT author_id, author_name FROM featured_authors WHERE is_active = 1'
-        );
+        const { data: authors } = await supabase
+          .from('featured_authors')
+          .select('author_id, author_name')
+          .eq('is_active', true);
 
-        return NextResponse.json({ authors });
+        return NextResponse.json({ authors: authors || [] });
       }
 
       default:
         // Default: return status
         const active = await getActiveFreshScrape();
-        const paused = await db.getAsync<FreshScrapeState>(
-          `SELECT * FROM fresh_scrape_state WHERE status = 'paused' ORDER BY created_at DESC LIMIT 1`
-        );
+        const { data: paused } = await supabase
+          .from('fresh_scrape_state')
+          .select('*')
+          .eq('status', 'paused')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
 
         return NextResponse.json({
           isActive: !!active,

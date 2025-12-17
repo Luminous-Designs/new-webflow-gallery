@@ -9,7 +9,8 @@ import {
   checkSshKey,
   getSetupInstructions,
   clearPlatformCache,
-  PlatformInfo
+  PlatformInfo,
+  RsyncOptions
 } from '@/lib/sync/platform';
 import { db } from '@/lib/db';
 
@@ -445,6 +446,108 @@ async function deleteExcessVpsFiles(
   }
 }
 
+/**
+ * Clean up local files that are not in the SQLite database
+ * SQLite database is the source of truth
+ */
+async function cleanupLocalExcessFiles(): Promise<{
+  deletedScreenshots: string[];
+  deletedThumbnails: string[];
+  errors: string[];
+}> {
+  const validFiles = await getValidFilenamesFromDatabase();
+  const deletedScreenshots: string[] = [];
+  const deletedThumbnails: string[] = [];
+  const errors: string[] = [];
+
+  const screenshotsPath = path.join(process.cwd(), 'public', 'screenshots');
+  const thumbnailsPath = path.join(process.cwd(), 'public', 'thumbnails');
+
+  // Clean up screenshots
+  try {
+    const localScreenshots = await fs.promises.readdir(screenshotsPath);
+    for (const file of localScreenshots) {
+      if (file.startsWith('.')) continue; // Skip hidden files
+      if (!validFiles.screenshots.has(file)) {
+        try {
+          await fs.promises.unlink(path.join(screenshotsPath, file));
+          deletedScreenshots.push(file);
+        } catch (err) {
+          errors.push(`Failed to delete screenshot ${file}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+      }
+    }
+  } catch (err) {
+    errors.push(`Failed to read screenshots directory: ${err instanceof Error ? err.message : 'Unknown error'}`);
+  }
+
+  // Clean up thumbnails
+  try {
+    const localThumbnails = await fs.promises.readdir(thumbnailsPath);
+    for (const file of localThumbnails) {
+      if (file.startsWith('.')) continue; // Skip hidden files
+      if (!validFiles.thumbnails.has(file)) {
+        try {
+          await fs.promises.unlink(path.join(thumbnailsPath, file));
+          deletedThumbnails.push(file);
+        } catch (err) {
+          errors.push(`Failed to delete thumbnail ${file}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+      }
+    }
+  } catch (err) {
+    errors.push(`Failed to read thumbnails directory: ${err instanceof Error ? err.message : 'Unknown error'}`);
+  }
+
+  return { deletedScreenshots, deletedThumbnails, errors };
+}
+
+/**
+ * Analyze local files for excess (not in database)
+ */
+async function analyzeLocalExcessFiles(): Promise<{
+  excessScreenshots: string[];
+  excessThumbnails: string[];
+  totalExcess: number;
+}> {
+  const validFiles = await getValidFilenamesFromDatabase();
+  const excessScreenshots: string[] = [];
+  const excessThumbnails: string[] = [];
+
+  const screenshotsPath = path.join(process.cwd(), 'public', 'screenshots');
+  const thumbnailsPath = path.join(process.cwd(), 'public', 'thumbnails');
+
+  try {
+    const localScreenshots = await fs.promises.readdir(screenshotsPath);
+    for (const file of localScreenshots) {
+      if (file.startsWith('.')) continue;
+      if (!validFiles.screenshots.has(file)) {
+        excessScreenshots.push(file);
+      }
+    }
+  } catch {
+    // Directory might not exist
+  }
+
+  try {
+    const localThumbnails = await fs.promises.readdir(thumbnailsPath);
+    for (const file of localThumbnails) {
+      if (file.startsWith('.')) continue;
+      if (!validFiles.thumbnails.has(file)) {
+        excessThumbnails.push(file);
+      }
+    }
+  } catch {
+    // Directory might not exist
+  }
+
+  return {
+    excessScreenshots,
+    excessThumbnails,
+    totalExcess: excessScreenshots.length + excessThumbnails.length
+  };
+}
+
 async function testVpsConnection(
   config: typeof DEFAULT_VPS_CONFIG,
   platform: PlatformInfo
@@ -537,13 +640,21 @@ function startRsyncProcess(
     lastUpdate: new Date().toISOString(),
     logs: [
       { timestamp: new Date().toISOString(), message: `Starting ${direction} sync...` },
-      { timestamp: new Date().toISOString(), message: `Platform: ${platform.os} | rsync: ${platform.rsyncPath || 'not found'}` }
+      { timestamp: new Date().toISOString(), message: `Platform: ${platform.os} | rsync: ${platform.rsyncPath || 'not found'}` },
+      { timestamp: new Date().toISOString(), message: `SQLite database is the source of truth` }
     ]
   };
   pauseRequested = false;
 
   const runSync = async () => {
     const phases: Array<'screenshots' | 'thumbnails'> = ['screenshots', 'thumbnails'];
+
+    // Get valid files from database for filtering
+    const validFiles = await getValidFilenamesFromDatabase();
+    syncProgress?.logs.push({
+      timestamp: new Date().toISOString(),
+      message: `Database contains ${validFiles.screenshots.size} screenshots and ${validFiles.thumbnails.size} thumbnails`
+    });
 
     for (const phase of phases) {
       if (pauseRequested || !syncProgress) break;
@@ -562,12 +673,47 @@ function startRsyncProcess(
         remotePath: `${config.remotePath}/${phase}/`
       };
 
-      // For bidirectional, pull first then push
-      const directions: Array<'push' | 'pull'> = direction === 'bidirectional'
-        ? ['pull', 'push']
-        : [direction];
+      // Get the valid files for this phase
+      const validFilesForPhase = phase === 'screenshots'
+        ? Array.from(validFiles.screenshots)
+        : Array.from(validFiles.thumbnails);
 
-      for (const dir of directions) {
+      // Determine sync directions and options based on mode
+      let syncOperations: Array<{ dir: 'push' | 'pull'; options: RsyncOptions }>;
+
+      if (direction === 'pull') {
+        // PULL: Mirror VPS to local, delete local files not on VPS
+        // Then clean up anything not in database
+        syncOperations = [{
+          dir: 'pull',
+          options: { delete: true }  // Delete local files not on VPS
+        }];
+      } else if (direction === 'push') {
+        // PUSH: Upload local to VPS (no delete, just add/update)
+        syncOperations = [{
+          dir: 'push',
+          options: {}
+        }];
+      } else {
+        // BIDIRECTIONAL: Sync both ways using database as source of truth
+        // Only sync files that exist in the database
+        syncOperations = [
+          {
+            dir: 'pull',
+            options: {
+              includeFiles: validFilesForPhase,  // Only pull files in database
+            }
+          },
+          {
+            dir: 'push',
+            options: {
+              includeFiles: validFilesForPhase,  // Only push files in database
+            }
+          }
+        ];
+      }
+
+      for (const { dir, options } of syncOperations) {
         if (pauseRequested || !syncProgress) break;
 
         const { command, args } = buildRsyncArgs(
@@ -575,12 +721,18 @@ function startRsyncProcess(
           localPath,
           dir,
           platform,
-          { update: direction === 'bidirectional' }
+          options
         );
+
+        const modeDescription = options.delete
+          ? '(with --delete)'
+          : options.includeFiles
+            ? `(filtered to ${options.includeFiles.length} DB files)`
+            : '';
 
         syncProgress.logs.push({
           timestamp: new Date().toISOString(),
-          message: `Running: ${command} ${args.slice(0, 3).join(' ')} ...`
+          message: `Running ${dir} ${modeDescription}: ${command} ...`
         });
 
         await new Promise<void>((resolve, reject) => {
@@ -613,6 +765,15 @@ function startRsyncProcess(
                 if (fileMatch) {
                   syncProgress!.currentFile = fileMatch[1];
                   syncProgress!.transferredFiles++;
+                }
+
+                // Parse deleted files
+                const deleteMatch = line.match(/^\*deleting\s+(.+)$/);
+                if (deleteMatch && syncProgress) {
+                  syncProgress.logs.push({
+                    timestamp: new Date().toISOString(),
+                    message: `Deleted: ${deleteMatch[1]}`
+                  });
                 }
 
                 // Parse progress percentage
@@ -656,6 +817,38 @@ function startRsyncProcess(
             reject(error);
           });
         });
+      }
+    }
+
+    // After rsync completes, clean up local files not in database
+    if (!pauseRequested && syncProgress && (direction === 'pull' || direction === 'bidirectional')) {
+      syncProgress.logs.push({
+        timestamp: new Date().toISOString(),
+        message: 'Cleaning up local files not in database...'
+      });
+
+      const cleanup = await cleanupLocalExcessFiles();
+      const totalDeleted = cleanup.deletedScreenshots.length + cleanup.deletedThumbnails.length;
+
+      if (totalDeleted > 0) {
+        syncProgress.logs.push({
+          timestamp: new Date().toISOString(),
+          message: `Cleaned up ${cleanup.deletedScreenshots.length} screenshots and ${cleanup.deletedThumbnails.length} thumbnails not in database`
+        });
+      } else {
+        syncProgress.logs.push({
+          timestamp: new Date().toISOString(),
+          message: 'No local excess files to clean up'
+        });
+      }
+
+      if (cleanup.errors.length > 0) {
+        for (const err of cleanup.errors) {
+          syncProgress.logs.push({
+            timestamp: new Date().toISOString(),
+            message: `Cleanup error: ${err}`
+          });
+        }
       }
     }
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { supabase } from '@/lib/supabase';
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,31 +11,43 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if visitor exists
-    const existing = await db.getAsync<{ id: number }>(
-      'SELECT id FROM visitors WHERE session_id = ?',
-      [sessionId]
-    );
+    const { data: existing, error: selectError } = await supabase
+      .from('visitors')
+      .select('id')
+      .eq('session_id', sessionId)
+      .single();
 
     const forwardedFor = request.headers.get('x-forwarded-for') ?? '';
     const ip = forwardedFor.split(',')[0]?.trim() || request.headers.get('x-real-ip') || '';
     const userAgent = request.headers.get('user-agent') || '';
 
-    if (existing) {
+    if (existing && !selectError) {
       // Update existing visitor
-      await db.runAsync(
-        `UPDATE visitors SET
-          current_step = ?, selected_template_id = ?, last_activity = datetime('now'),
-          ip_address = ?, user_agent = ?
-        WHERE id = ?`,
-        [currentStep, selectedTemplateId, ip, userAgent, existing.id]
-      );
+      const { error: updateError } = await supabase
+        .from('visitors')
+        .update({
+          current_step: currentStep,
+          selected_template_id: selectedTemplateId,
+          last_activity: new Date().toISOString(),
+          ip_address: ip,
+          user_agent: userAgent
+        })
+        .eq('id', existing.id);
+
+      if (updateError) throw updateError;
     } else {
       // Create new visitor
-      await db.runAsync(
-        `INSERT INTO visitors (session_id, current_step, selected_template_id, ip_address, user_agent)
-        VALUES (?, ?, ?, ?, ?)`,
-        [sessionId, currentStep, selectedTemplateId, ip, userAgent]
-      );
+      const { error: insertError } = await supabase
+        .from('visitors')
+        .insert({
+          session_id: sessionId,
+          current_step: currentStep,
+          selected_template_id: selectedTemplateId,
+          ip_address: ip,
+          user_agent: userAgent
+        });
+
+      if (insertError) throw insertError;
     }
 
     return NextResponse.json({ success: true });

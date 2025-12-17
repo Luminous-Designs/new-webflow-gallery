@@ -281,6 +281,13 @@ export function buildSshCommand(
   return `${sshCmd} -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes -i "${keyPath}"`;
 }
 
+export interface RsyncOptions {
+  update?: boolean;           // Use -u flag (skip newer files on destination)
+  delete?: boolean;           // Use --delete flag (delete files not on source)
+  includeFiles?: string[];    // Only sync these specific files
+  dryRun?: boolean;           // Use --dry-run flag (simulate without changes)
+}
+
 /**
  * Build rsync command arguments (cross-platform)
  */
@@ -289,7 +296,7 @@ export function buildRsyncArgs(
   localPath: string,
   direction: 'push' | 'pull',
   platform: PlatformInfo,
-  options: { update?: boolean } = {}
+  options: RsyncOptions = {}
 ): { command: string; args: string[] } {
   const keyPath = expandPath(config.sshKeyPath);
   const remotePath = `${config.user}@${config.host}:${config.remotePath}`;
@@ -313,9 +320,41 @@ export function buildRsyncArgs(
     sshCmd = `ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i "${keyPath}"`;
   }
 
-  const baseArgs = options.update
-    ? ['-avzu', '-e', sshCmd, '--progress', '--itemize-changes']
-    : ['-avz', '-e', sshCmd, '--progress', '--itemize-changes'];
+  // Build base args
+  const baseArgs: string[] = [];
+
+  // Archive mode with compression
+  if (options.update) {
+    baseArgs.push('-avzu');
+  } else {
+    baseArgs.push('-avz');
+  }
+
+  // SSH command
+  baseArgs.push('-e', sshCmd);
+
+  // Progress and itemize
+  baseArgs.push('--progress', '--itemize-changes');
+
+  // Delete files on destination not present on source
+  if (options.delete) {
+    baseArgs.push('--delete');
+  }
+
+  // Dry run mode
+  if (options.dryRun) {
+    baseArgs.push('--dry-run');
+  }
+
+  // Include specific files only (for SQLite-based filtering)
+  if (options.includeFiles && options.includeFiles.length > 0) {
+    // Add include patterns for each file
+    for (const file of options.includeFiles) {
+      baseArgs.push('--include', file);
+    }
+    // Exclude everything else
+    baseArgs.push('--exclude', '*');
+  }
 
   const source = direction === 'push' ? rsyncLocalPath : remotePath;
   const dest = direction === 'push' ? remotePath : rsyncLocalPath;

@@ -413,10 +413,32 @@ function SyncFlowDiagram({ direction, config }: { direction: 'push' | 'pull' | '
         </div>
       </div>
 
-      <div className="mt-4 text-center text-sm text-gray-600">
-        {direction === 'push' && 'Uploads local images to VPS server'}
-        {direction === 'pull' && 'Downloads VPS images to local machine'}
-        {direction === 'bidirectional' && 'Syncs both directions - newest files win'}
+      <div className="mt-4 text-center">
+        {direction === 'push' && (
+          <div className="text-sm text-gray-600">
+            Uploads local images to VPS server
+          </div>
+        )}
+        {direction === 'pull' && (
+          <div className="space-y-1">
+            <div className="text-sm text-green-700 font-medium">
+              Replaces local files with VPS images
+            </div>
+            <div className="text-xs text-amber-600">
+              Deletes local files not on VPS, then removes files not in database
+            </div>
+          </div>
+        )}
+        {direction === 'bidirectional' && (
+          <div className="space-y-1">
+            <div className="text-sm text-purple-700 font-medium">
+              Syncs only files that exist in the database
+            </div>
+            <div className="text-xs text-purple-600">
+              Pulls DB files from VPS, pushes DB files to VPS, cleans up excess
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Target path indicator */}
@@ -1235,6 +1257,15 @@ export function SyncSection() {
         {!isSyncing && !syncProgress && (
           <div className="mb-6">
             <Label className="mb-3 block">Sync Direction</Label>
+
+            {/* SQLite Source of Truth Notice */}
+            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <div className="flex items-center gap-2 text-blue-800 text-sm">
+                <Database className="h-4 w-4 shrink-0" />
+                <span><strong>SQLite database is the source of truth.</strong> Only files linked to templates in the database will be kept.</span>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <button
                 onClick={() => setSelectedDirection('push')}
@@ -1250,7 +1281,8 @@ export function SyncSection() {
                   selectedDirection === 'push' ? "text-blue-500" : "text-gray-400"
                 )} />
                 <h4 className="font-medium">Push to VPS</h4>
-                <p className="text-sm text-gray-500">Upload local images</p>
+                <p className="text-sm text-gray-500">Upload local images to VPS</p>
+                <p className="text-xs text-gray-400 mt-1">Adds/updates files on VPS</p>
               </button>
 
               <button
@@ -1267,7 +1299,8 @@ export function SyncSection() {
                   selectedDirection === 'pull' ? "text-green-500" : "text-gray-400"
                 )} />
                 <h4 className="font-medium">Pull from VPS</h4>
-                <p className="text-sm text-gray-500">Download VPS images</p>
+                <p className="text-sm text-gray-500">Replace local with VPS images</p>
+                <p className="text-xs text-amber-600 mt-1 font-medium">Wipes local &amp; syncs to DB</p>
               </button>
 
               <button
@@ -1284,7 +1317,8 @@ export function SyncSection() {
                   selectedDirection === 'bidirectional' ? "text-purple-500" : "text-gray-400"
                 )} />
                 <h4 className="font-medium">Bidirectional</h4>
-                <p className="text-sm text-gray-500">Sync both ways</p>
+                <p className="text-sm text-gray-500">Sync DB files both ways</p>
+                <p className="text-xs text-purple-600 mt-1 font-medium">Only syncs files in DB</p>
               </button>
             </div>
 
@@ -1694,8 +1728,8 @@ export function SyncSection() {
             <div className="prose prose-sm max-w-none text-gray-600">
               <p>
                 The image sync system uses <code>rsync</code> to efficiently transfer images between
-                your local development machine and the VPS production server. This ensures your
-                template screenshots and thumbnails are always available where needed.
+                your local development machine and the VPS production server. <strong>The SQLite database
+                is always the source of truth</strong> - only files linked to templates in the database are kept.
               </p>
               {platform?.isWindows && (
                 <p className="text-amber-700 bg-amber-50 p-2 rounded">
@@ -1705,12 +1739,30 @@ export function SyncSection() {
               )}
             </div>
 
+            {/* Source of Truth Notice */}
+            <div className="p-4 bg-indigo-50 border border-indigo-200 rounded-lg">
+              <div className="flex items-start gap-3">
+                <Database className="h-5 w-5 text-indigo-600 mt-0.5 shrink-0" />
+                <div>
+                  <h4 className="font-medium text-indigo-900">SQLite = Source of Truth</h4>
+                  <p className="text-sm text-indigo-700 mt-1">
+                    All sync operations reference the local SQLite database. Files are named <code>{'{slug}'}.webp</code> for
+                    screenshots and <code>{'{slug}'}_thumb.webp</code> for thumbnails. Any file not matching a template slug
+                    in the database is considered &quot;excess&quot; and can be cleaned up.
+                  </p>
+                </div>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="p-4 bg-blue-50 rounded-lg">
                 <ArrowUpToLine className="h-6 w-6 text-blue-600 mb-2" />
                 <h4 className="font-medium text-blue-900">Push</h4>
                 <p className="text-sm text-blue-700">
-                  Uploads new screenshots from your local machine to the VPS. Use after scraping new templates.
+                  Uploads local images to VPS. Use after scraping new templates locally.
+                </p>
+                <p className="text-xs text-blue-600 mt-2 font-medium">
+                  Adds/updates files on VPS (does not delete)
                 </p>
               </div>
 
@@ -1718,7 +1770,10 @@ export function SyncSection() {
                 <ArrowDownToLine className="h-6 w-6 text-green-600 mb-2" />
                 <h4 className="font-medium text-green-900">Pull</h4>
                 <p className="text-sm text-green-700">
-                  Downloads images from VPS to your local machine. Use when setting up a new dev environment.
+                  <strong>Replaces</strong> local images with VPS content. Use when setting up a new dev environment.
+                </p>
+                <p className="text-xs text-amber-600 mt-2 font-medium">
+                  Wipes local files, then removes any not in database
                 </p>
               </div>
 
@@ -1726,7 +1781,10 @@ export function SyncSection() {
                 <RefreshCcw className="h-6 w-6 text-purple-600 mb-2" />
                 <h4 className="font-medium text-purple-900">Bidirectional</h4>
                 <p className="text-sm text-purple-700">
-                  Syncs both directions - newest files win. Use to keep both environments fully up to date.
+                  Syncs <strong>only files in the database</strong> both ways. Use to align both environments.
+                </p>
+                <p className="text-xs text-purple-600 mt-2 font-medium">
+                  Filters by DB templates, cleans up local excess
                 </p>
               </div>
             </div>

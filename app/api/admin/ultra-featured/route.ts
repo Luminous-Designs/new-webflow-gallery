@@ -1,10 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
-
-type FeaturedTemplateRow = Record<string, unknown> & {
-  subcategories?: string | null;
-  styles?: string | null;
-};
+import { supabase, getUltraFeaturedTemplates, replaceUltraFeaturedTemplates } from '@/lib/supabase';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -13,62 +8,70 @@ function isAuthorized(request: NextRequest) {
   return authHeader && authHeader === `Bearer ${process.env.ADMIN_PASSWORD}`;
 }
 
+async function getTemplateMetadata(templateId: number) {
+  const [subcatsData, stylesData] = await Promise.all([
+    supabase
+      .from('template_subcategories')
+      .select('subcategories(name)')
+      .eq('template_id', templateId),
+    supabase
+      .from('template_styles')
+      .select('styles(name)')
+      .eq('template_id', templateId)
+  ]);
+
+  const subcategories = subcatsData.data?.map(d => (d.subcategories as { name: string })?.name).filter(Boolean) || [];
+  const styles = stylesData.data?.map(d => (d.styles as { name: string })?.name).filter(Boolean) || [];
+
+  return { subcategories, styles };
+}
+
 export async function GET(request: NextRequest) {
   try {
     if (!isAuthorized(request)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const selectColumns = `
-      t.id,
-      t.template_id,
-      t.name,
-      t.slug,
-      t.author_name,
-      t.author_id,
-      t.storefront_url,
-      t.live_preview_url,
-      t.designer_preview_url,
-      t.price,
-      t.short_description,
-      t.screenshot_path,
-      t.screenshot_thumbnail_path,
-      t.is_featured,
-      t.is_cms,
-      t.is_ecommerce,
-      t.created_at,
-      t.updated_at
-    `;
+    // Get ultra featured templates
+    const ultraFeatured = await getUltraFeaturedTemplates();
 
-    const [ultraFeatured, featuredAuthorTemplates] = await Promise.all([
-      db.getUltraFeaturedTemplates(),
-      db.allAsync<FeaturedTemplateRow>(
-        `SELECT ${selectColumns},
-                GROUP_CONCAT(DISTINCT s.name) as subcategories,
-                GROUP_CONCAT(DISTINCT st.name) as styles
-         FROM templates t
-         JOIN featured_authors fa ON fa.author_id = t.author_id
-         LEFT JOIN template_subcategories ts ON t.id = ts.template_id
-         LEFT JOIN subcategories s ON ts.subcategory_id = s.id
-         LEFT JOIN template_styles tst ON t.id = tst.template_id
-         LEFT JOIN styles st ON tst.style_id = st.id
-         WHERE fa.is_active = 1
-         GROUP BY t.id
-         ORDER BY t.updated_at DESC`
-      )
-    ]);
+    // Get featured author IDs
+    const { data: featuredAuthors } = await supabase
+      .from('featured_authors')
+      .select('author_id')
+      .eq('is_active', true);
+
+    const authorIds = featuredAuthors?.map(a => a.author_id) || [];
+
+    if (authorIds.length === 0) {
+      return NextResponse.json({
+        ultraFeatured,
+        pool: []
+      });
+    }
+
+    // Get templates from featured authors
+    const { data: templates } = await supabase
+      .from('templates')
+      .select('*')
+      .in('author_id', authorIds)
+      .order('updated_at', { ascending: false });
+
+    // Add metadata to each template
+    const pool = await Promise.all(
+      (templates || []).map(async (template) => {
+        const { subcategories, styles } = await getTemplateMetadata(template.id);
+        return {
+          ...template,
+          subcategories,
+          styles
+        };
+      })
+    );
 
     return NextResponse.json({
       ultraFeatured,
-      pool: featuredAuthorTemplates.map((template) => ({
-        ...template,
-        subcategories: typeof template.subcategories === 'string'
-          ? template.subcategories.split(',')
-          : [],
-        styles: typeof template.styles === 'string'
-          ? template.styles.split(',')
-          : [],
-      }))
+      pool
     });
   } catch (error) {
     console.error('Ultra featured GET error:', error);
@@ -94,9 +97,9 @@ export async function POST(request: NextRequest) {
         .filter((id: number) => Number.isFinite(id))
     ));
 
-    await db.replaceUltraFeaturedTemplates(numericIds);
+    await replaceUltraFeaturedTemplates(numericIds);
 
-    const ultraFeatured = await db.getUltraFeaturedTemplates();
+    const ultraFeatured = await getUltraFeaturedTemplates();
 
     return NextResponse.json({
       message: 'Ultra featured templates updated',

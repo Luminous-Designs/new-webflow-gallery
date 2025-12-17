@@ -157,10 +157,22 @@ Remote directory structure:
 - `/data/webflow-gallery/thumbnails/` - Thumbnail WebP files
 
 ### Sync Operations
-Three sync directions available:
-1. **Push**: Upload local images to VPS (after scraping new templates)
-2. **Pull**: Download VPS images to local (for new dev environment setup)
-3. **Bidirectional**: Sync both ways with newest-wins conflict resolution
+Three sync directions available, all using **SQLite as the source of truth**:
+
+1. **Push**: Upload local images to VPS
+   - Adds/updates files on VPS (does not delete)
+   - Use after scraping new templates locally
+
+2. **Pull**: Replace local images with VPS content
+   - Uses `--delete` flag to mirror VPS to local
+   - After rsync, removes any local files not in the SQLite database
+   - Use when setting up a new dev environment
+
+3. **Bidirectional**: Sync only database files both ways
+   - Only syncs files that exist in the SQLite database
+   - Pulls DB files from VPS, then pushes DB files to VPS
+   - Cleans up local excess files not in database
+   - Use to keep both environments aligned with the database
 
 ### Delete Excess Files Feature
 Cleans up orphaned images on the VPS that have no corresponding template in the SQLite database.
@@ -192,10 +204,25 @@ Cleans up orphaned images on the VPS that have no corresponding template in the 
 - `compare` - Full comparison with discrepancies
 - `platform` - Re-detect platform and tools
 - `analyze-excess` - Find orphaned files on VPS
+- `delete-excess-status` - Get deletion progress
 
 **POST Actions:**
 - `start` - Start rsync (requires `direction`: push/pull/bidirectional)
+  - `pull`: Uses `--delete` to mirror VPS, then cleans up local excess
+  - `bidirectional`: Syncs only files in database, cleans up local excess
 - `pause` - Pause running sync
 - `stop` - Stop running sync
 - `clear` - Clear sync session
 - `delete-excess` - Delete orphaned files from VPS
+- `clear-delete-progress` - Clear deletion state
+
+### Cross-Platform Support
+**Windows:**
+- Uses Windows OpenSSH (built-in since Windows 10)
+- Supports cwRsync, Git Bash rsync, MSYS2, or Cygwin
+- Path conversion: `C:\` → `/cygdrive/c/` for cwRsync
+- Command execution via `cmd.exe` shell
+
+**macOS/Linux:**
+- Standard `ssh` and `rsync` commands
+- Command execution via `/bin/bash` shell

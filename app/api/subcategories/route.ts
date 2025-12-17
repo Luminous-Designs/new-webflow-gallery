@@ -1,17 +1,34 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { supabase } from '@/lib/supabase';
 
 export async function GET() {
   try {
-    const subcategories = await db.allAsync(`
-      SELECT s.*, COUNT(ts.template_id) as template_count
-      FROM subcategories s
-      LEFT JOIN template_subcategories ts ON s.id = ts.subcategory_id
-      GROUP BY s.id
-      ORDER BY template_count DESC
-    `);
+    // Get all subcategories
+    const { data: subcategories, error } = await supabase
+      .from('subcategories')
+      .select('*')
+      .order('name');
 
-    return NextResponse.json(subcategories);
+    if (error) {
+      throw error;
+    }
+
+    // Get counts for each subcategory
+    const subcategoriesWithCounts = await Promise.all(
+      (subcategories || []).map(async (sub) => {
+        const { count } = await supabase
+          .from('template_subcategories')
+          .select('*', { count: 'exact', head: true })
+          .eq('subcategory_id', sub.id);
+
+        return { ...sub, template_count: count || 0 };
+      })
+    );
+
+    // Sort by template count descending
+    subcategoriesWithCounts.sort((a, b) => b.template_count - a.template_count);
+
+    return NextResponse.json(subcategoriesWithCounts);
 
   } catch (error) {
     console.error('Subcategories API error:', error);

@@ -1,12 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
-
-type TemplateRow = Record<string, unknown> & {
-  subcategories?: string | null;
-  styles?: string | null;
-  is_featured_author?: number | null;
-  features?: string | null;
-};
+import { supabase } from '@/lib/supabase';
 
 export async function GET(request: NextRequest) {
   try {
@@ -36,61 +29,85 @@ export async function GET(request: NextRequest) {
       collection
     });
 
-    const selectColumns = `
-      t.id,
-      t.template_id,
-      t.name,
-      t.slug,
-      t.author_name,
-      t.author_id,
-      t.storefront_url,
-      t.live_preview_url,
-      t.designer_preview_url,
-      t.price,
-      t.short_description,
-      t.screenshot_path,
-      t.screenshot_thumbnail_path,
-      t.is_featured,
-      t.is_cms,
-      t.is_ecommerce,
-      t.created_at,
-      t.updated_at
-    `;
-
+    // Handle ultra-featured collection
     if (collection === 'ultra') {
-      const templates = await db.allAsync<TemplateRow>(
-        `SELECT ${selectColumns},
-                uft.position,
-                GROUP_CONCAT(DISTINCT s.name) as subcategories,
-                GROUP_CONCAT(DISTINCT st.name) as styles,
-                CASE WHEN fa.author_id IS NOT NULL THEN 1 ELSE 0 END as is_featured_author
-         FROM ultra_featured_templates uft
-         JOIN templates t ON t.id = uft.template_id
-         LEFT JOIN template_subcategories ts ON t.id = ts.template_id
-         LEFT JOIN subcategories s ON ts.subcategory_id = s.id
-         LEFT JOIN template_styles tst ON t.id = tst.template_id
-         LEFT JOIN styles st ON tst.style_id = st.id
-         LEFT JOIN featured_authors fa ON t.author_id = fa.author_id AND fa.is_active = 1
-         GROUP BY t.id
-         ORDER BY uft.position ASC
-         LIMIT ? OFFSET ?`,
-        [limit, offset]
+      const { data: ultraFeatured, error: ultraError } = await supabase
+        .from('ultra_featured_templates')
+        .select(`
+          position,
+          templates (
+            id,
+            template_id,
+            name,
+            slug,
+            author_name,
+            author_id,
+            storefront_url,
+            live_preview_url,
+            designer_preview_url,
+            price,
+            short_description,
+            screenshot_path,
+            screenshot_thumbnail_path,
+            is_featured,
+            is_cms,
+            is_ecommerce,
+            created_at,
+            updated_at
+          )
+        `)
+        .order('position')
+        .range(offset, offset + limit - 1);
+
+      if (ultraError) {
+        console.error('Ultra featured error:', ultraError);
+        throw ultraError;
+      }
+
+      const { count: totalUltra } = await supabase
+        .from('ultra_featured_templates')
+        .select('*', { count: 'exact', head: true });
+
+      // Get featured authors for checking
+      const { data: featuredAuthors } = await supabase
+        .from('featured_authors')
+        .select('author_id')
+        .eq('is_active', true);
+      const featuredAuthorIds = new Set(featuredAuthors?.map(a => a.author_id) || []);
+
+      // Process templates with metadata
+      const templates = await Promise.all(
+        (ultraFeatured || []).map(async (uf) => {
+          const template = uf.templates as Record<string, unknown>;
+          if (!template) return null;
+
+          // Get subcategories
+          const { data: subcats } = await supabase
+            .from('template_subcategories')
+            .select('subcategories(name)')
+            .eq('template_id', template.id as number);
+
+          // Get styles
+          const { data: templateStyles } = await supabase
+            .from('template_styles')
+            .select('styles(name)')
+            .eq('template_id', template.id as number);
+
+          return {
+            ...template,
+            position: uf.position,
+            subcategories: subcats?.map(s => (s.subcategories as { name: string })?.name).filter(Boolean) || [],
+            styles: templateStyles?.map(s => (s.styles as { name: string })?.name).filter(Boolean) || [],
+            is_featured_author: featuredAuthorIds.has(template.author_id as string)
+          };
+        })
       );
 
-      const countResult = await db.getAsync<{ total: number }>(
-        'SELECT COUNT(*) as total FROM ultra_featured_templates'
-      );
-
-      const total = countResult?.total || 0;
+      const total = totalUltra || 0;
       const totalPages = Math.ceil(total / limit);
 
       return NextResponse.json({
-        templates: templates.map((t) => ({
-          ...t,
-          subcategories: typeof t.subcategories === 'string' ? t.subcategories.split(',') : [],
-          styles: typeof t.styles === 'string' ? t.styles.split(',') : [],
-          is_featured_author: t.is_featured_author === 1
-        })),
+        templates: templates.filter(Boolean),
         pagination: {
           page,
           limit,
@@ -102,77 +119,152 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    let query = `
-      SELECT DISTINCT ${selectColumns},
-        GROUP_CONCAT(DISTINCT s.name) as subcategories,
-        GROUP_CONCAT(DISTINCT st.name) as styles,
-        CASE WHEN fa.author_id IS NOT NULL THEN 1 ELSE 0 END as is_featured_author
-      FROM templates t
-      LEFT JOIN template_subcategories ts ON t.id = ts.template_id
-      LEFT JOIN subcategories s ON ts.subcategory_id = s.id
-      LEFT JOIN template_styles tst ON t.id = tst.template_id
-      LEFT JOIN styles st ON tst.style_id = st.id
-      LEFT JOIN featured_authors fa ON t.author_id = fa.author_id AND fa.is_active = 1
-    `;
+    // Build main query
+    let query = supabase.from('templates').select('*', { count: 'exact' });
 
-    const conditions: string[] = [];
-    const params: (string | number)[] = [];
-
-    if (subcategory) {
-      conditions.push(`s.slug = ?`);
-      params.push(subcategory);
-    }
-
-    if (style) {
-      conditions.push(`st.slug = ?`);
-      params.push(style);
-    }
-
+    // Apply filters
     if (author) {
-      conditions.push(`t.author_id = ?`);
-      params.push(author);
+      query = query.eq('author_id', author);
     }
 
+    // For subcategory filter, we need to get template IDs first
+    let templateIdsFromSubcategory: Set<number> | null = null;
+    if (subcategory) {
+      const { data: subcatData } = await supabase
+        .from('subcategories')
+        .select('id')
+        .eq('slug', subcategory)
+        .single();
+
+      if (subcatData) {
+        const { data: templateSubcats } = await supabase
+          .from('template_subcategories')
+          .select('template_id')
+          .eq('subcategory_id', subcatData.id);
+
+        templateIdsFromSubcategory = new Set(templateSubcats?.map(ts => ts.template_id) || []);
+      }
+    }
+
+    // For style filter
+    let templateIdsFromStyle: Set<number> | null = null;
+    if (style) {
+      const { data: styleData } = await supabase
+        .from('styles')
+        .select('id')
+        .eq('slug', style)
+        .single();
+
+      if (styleData) {
+        const { data: templateStyleData } = await supabase
+          .from('template_styles')
+          .select('template_id')
+          .eq('style_id', styleData.id);
+
+        templateIdsFromStyle = new Set(templateStyleData?.map(ts => ts.template_id) || []);
+      }
+    }
+
+    // For featured filter
+    let featuredAuthorIds: Set<string> | null = null;
     if (featured) {
-      conditions.push(`t.author_id IN (SELECT author_id FROM featured_authors WHERE is_active = 1)`);
+      const { data: featuredAuthors } = await supabase
+        .from('featured_authors')
+        .select('author_id')
+        .eq('is_active', true);
+
+      featuredAuthorIds = new Set(featuredAuthors?.map(a => a.author_id) || []);
     }
 
-    if (conditions.length > 0) {
-      query += ` WHERE ${conditions.join(' AND ')}`;
+    // Get all featured authors for display
+    const { data: allFeaturedAuthors } = await supabase
+      .from('featured_authors')
+      .select('author_id')
+      .eq('is_active', true);
+    const allFeaturedAuthorIds = new Set(allFeaturedAuthors?.map(a => a.author_id) || []);
+
+    // Execute main query
+    const { data: templates, count, error } = await query
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      console.error('Templates query error:', error);
+      throw error;
     }
 
-    // Order by featured authors first, then by creation date
-    query += `
-      GROUP BY t.id
-      ORDER BY
-        CASE WHEN t.author_id IN (SELECT author_id FROM featured_authors WHERE is_active = 1) THEN 0 ELSE 1 END,
-        t.created_at DESC
-      LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
+    // Filter templates based on subcategory/style/featured
+    let filteredTemplates = templates || [];
 
-    const templates = await db.allAsync<TemplateRow>(query, params);
-    console.log('[Templates API] Query returned', templates.length, 'templates');
-
-    // Get total count for pagination
-    let countQuery = `
-      SELECT COUNT(DISTINCT t.id) as total
-      FROM templates t
-      LEFT JOIN template_subcategories ts ON t.id = ts.template_id
-      LEFT JOIN subcategories s ON ts.subcategory_id = s.id
-      LEFT JOIN template_styles tst ON t.id = tst.template_id
-      LEFT JOIN styles st ON tst.style_id = st.id
-    `;
-
-    if (conditions.length > 0) {
-      countQuery += ` WHERE ${conditions.join(' AND ')}`;
+    if (templateIdsFromSubcategory) {
+      filteredTemplates = filteredTemplates.filter(t => templateIdsFromSubcategory!.has(t.id));
     }
 
-    const countResult = await db.getAsync<{ total: number }>(
-      countQuery,
-      params.slice(0, -2) // Remove limit and offset
+    if (templateIdsFromStyle) {
+      filteredTemplates = filteredTemplates.filter(t => templateIdsFromStyle!.has(t.id));
+    }
+
+    if (featuredAuthorIds) {
+      filteredTemplates = filteredTemplates.filter(t => t.author_id && featuredAuthorIds!.has(t.author_id));
+    }
+
+    // Enhance templates with metadata
+    const enhancedTemplates = await Promise.all(
+      filteredTemplates.map(async (template) => {
+        // Get subcategories
+        const { data: subcats } = await supabase
+          .from('template_subcategories')
+          .select('subcategories(name)')
+          .eq('template_id', template.id);
+
+        // Get styles
+        const { data: templateStyles } = await supabase
+          .from('template_styles')
+          .select('styles(name)')
+          .eq('template_id', template.id);
+
+        return {
+          ...template,
+          subcategories: subcats?.map(s => (s.subcategories as { name: string })?.name).filter(Boolean) || [],
+          styles: templateStyles?.map(s => (s.styles as { name: string })?.name).filter(Boolean) || [],
+          is_featured_author: template.author_id ? allFeaturedAuthorIds.has(template.author_id) : false
+        };
+      })
     );
 
-    const total = countResult?.total || 0;
+    // Sort: featured authors first, then by created_at
+    enhancedTemplates.sort((a, b) => {
+      if (a.is_featured_author && !b.is_featured_author) return -1;
+      if (!a.is_featured_author && b.is_featured_author) return 1;
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+
+    // Calculate proper total for filtered results
+    let total = count || 0;
+    if (subcategory || style || featured) {
+      // Recalculate total for filtered results
+      let countQuery = supabase.from('templates').select('id', { count: 'exact', head: true });
+      if (author) {
+        countQuery = countQuery.eq('author_id', author);
+      }
+      const { count: filteredCount } = await countQuery;
+
+      // Apply same filters
+      if (templateIdsFromSubcategory) {
+        total = templateIdsFromSubcategory.size;
+      } else if (templateIdsFromStyle) {
+        total = templateIdsFromStyle.size;
+      } else if (featuredAuthorIds) {
+        const { count: featuredCount } = await supabase
+          .from('templates')
+          .select('id', { count: 'exact', head: true })
+          .in('author_id', Array.from(featuredAuthorIds));
+        total = featuredCount || 0;
+      } else {
+        total = filteredCount || 0;
+      }
+    }
+
     const totalPages = Math.ceil(total / limit);
 
     console.log('[Templates API] Pagination info:', {
@@ -180,16 +272,11 @@ export async function GET(request: NextRequest) {
       totalPages,
       currentPage: page,
       hasNext: page < totalPages,
-      returnedCount: templates.length
+      returnedCount: enhancedTemplates.length
     });
 
     return NextResponse.json({
-      templates: templates.map((t) => ({
-        ...t,
-        subcategories: typeof t.subcategories === 'string' ? t.subcategories.split(',') : [],
-        styles: typeof t.styles === 'string' ? t.styles.split(',') : [],
-        is_featured_author: t.is_featured_author === 1
-      })),
+      templates: enhancedTemplates,
       pagination: {
         page,
         limit,
@@ -214,32 +301,39 @@ export async function POST(request: NextRequest) {
   try {
     const { template_id } = await request.json();
 
-    const template = await db.getAsync<TemplateRow>(
-      `SELECT t.*,
-        GROUP_CONCAT(DISTINCT s.name) as subcategories,
-        GROUP_CONCAT(DISTINCT st.name) as styles,
-        GROUP_CONCAT(DISTINCT f.name) as features
-      FROM templates t
-      LEFT JOIN template_subcategories ts ON t.id = ts.template_id
-      LEFT JOIN subcategories s ON ts.subcategory_id = s.id
-      LEFT JOIN template_styles tst ON t.id = tst.template_id
-      LEFT JOIN styles st ON tst.style_id = st.id
-      LEFT JOIN template_features tf ON t.id = tf.template_id
-      LEFT JOIN features f ON tf.feature_id = f.id
-      WHERE t.template_id = ?
-      GROUP BY t.id`,
-      [template_id]
-    );
+    const { data: template, error } = await supabase
+      .from('templates')
+      .select('*')
+      .eq('template_id', template_id)
+      .single();
 
-    if (!template) {
+    if (error || !template) {
       return NextResponse.json({ error: 'Template not found' }, { status: 404 });
     }
 
+    // Get subcategories
+    const { data: subcats } = await supabase
+      .from('template_subcategories')
+      .select('subcategories(name)')
+      .eq('template_id', template.id);
+
+    // Get styles
+    const { data: templateStyles } = await supabase
+      .from('template_styles')
+      .select('styles(name)')
+      .eq('template_id', template.id);
+
+    // Get features
+    const { data: templateFeatures } = await supabase
+      .from('template_features')
+      .select('features(name)')
+      .eq('template_id', template.id);
+
     return NextResponse.json({
       ...template,
-      subcategories: typeof template.subcategories === 'string' ? template.subcategories.split(',') : [],
-      styles: typeof template.styles === 'string' ? template.styles.split(',') : [],
-      features: typeof template.features === 'string' ? template.features.split(',') : []
+      subcategories: subcats?.map(s => (s.subcategories as { name: string })?.name).filter(Boolean) || [],
+      styles: templateStyles?.map(s => (s.styles as { name: string })?.name).filter(Boolean) || [],
+      features: templateFeatures?.map(f => (f.features as { name: string })?.name).filter(Boolean) || []
     });
 
   } catch (error) {

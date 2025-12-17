@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { supabase } from '@/lib/supabase';
 
 export async function GET(request: NextRequest) {
   try {
@@ -10,23 +10,43 @@ export async function GET(request: NextRequest) {
     }
 
     // Get all featured authors
-    const authors = await db.allAsync(
-      `SELECT * FROM featured_authors
-       WHERE is_active = 1
-       ORDER BY featured_at DESC`
-    );
+    const { data: authors, error } = await supabase
+      .from('featured_authors')
+      .select('*')
+      .eq('is_active', true)
+      .order('featured_at', { ascending: false });
+
+    if (error) throw error;
 
     // Get all unique authors from templates for suggestions
-    const allAuthors = await db.allAsync(
-      `SELECT DISTINCT author_id, author_name, author_avatar, COUNT(*) as template_count
-       FROM templates
-       WHERE author_id IS NOT NULL
-       GROUP BY author_id
-       ORDER BY template_count DESC`
-    );
+    const { data: templates } = await supabase
+      .from('templates')
+      .select('author_id, author_name, author_avatar')
+      .not('author_id', 'is', null);
+
+    // Count templates per author
+    const authorMap = new Map<string, { author_id: string; author_name: string; author_avatar: string | null; template_count: number }>();
+    (templates || []).forEach(t => {
+      if (t.author_id) {
+        const existing = authorMap.get(t.author_id);
+        if (existing) {
+          existing.template_count++;
+        } else {
+          authorMap.set(t.author_id, {
+            author_id: t.author_id,
+            author_name: t.author_name || 'Unknown',
+            author_avatar: t.author_avatar,
+            template_count: 1
+          });
+        }
+      }
+    });
+
+    const allAuthors = Array.from(authorMap.values())
+      .sort((a, b) => b.template_count - a.template_count);
 
     return NextResponse.json({
-      featured: authors,
+      featured: authors || [],
       available: allAuthors
     });
 
@@ -55,11 +75,16 @@ export async function POST(request: NextRequest) {
     }
 
     // Add featured author
-    await db.runAsync(
-      `INSERT OR REPLACE INTO featured_authors (author_id, author_name, featured_at, is_active)
-       VALUES (?, ?, datetime('now'), 1)`,
-      [author_id, author_name]
-    );
+    const { error } = await supabase
+      .from('featured_authors')
+      .upsert({
+        author_id,
+        author_name,
+        is_active: true,
+        featured_at: new Date().toISOString()
+      }, { onConflict: 'author_id' });
+
+    if (error) throw error;
 
     return NextResponse.json({ message: 'Author featured successfully' });
 
@@ -88,10 +113,12 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Remove featured author
-    await db.runAsync(
-      `UPDATE featured_authors SET is_active = 0 WHERE author_id = ?`,
-      [author_id]
-    );
+    const { error } = await supabase
+      .from('featured_authors')
+      .update({ is_active: false })
+      .eq('author_id', author_id);
+
+    if (error) throw error;
 
     return NextResponse.json({ message: 'Author unfeatured successfully' });
 

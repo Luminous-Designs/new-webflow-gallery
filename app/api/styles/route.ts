@@ -1,23 +1,40 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { supabase } from '@/lib/supabase';
 
 export async function GET() {
   try {
-    // Get all styles with template count
-    const styles = await db.allAsync(
-      `SELECT
-        s.id,
-        s.name,
-        s.slug,
-        s.display_name,
-        COUNT(DISTINCT ts.template_id) as template_count
-       FROM styles s
-       LEFT JOIN template_styles ts ON s.id = ts.style_id
-       GROUP BY s.id, s.name, s.slug, s.display_name
-       ORDER BY template_count DESC, s.display_name ASC`
+    // Get all styles
+    const { data: styles, error: stylesError } = await supabase
+      .from('styles')
+      .select('id, name, slug, display_name')
+      .order('display_name');
+
+    if (stylesError) throw stylesError;
+
+    // Get template counts for each style
+    const stylesWithCounts = await Promise.all(
+      (styles || []).map(async (style) => {
+        const { count } = await supabase
+          .from('template_styles')
+          .select('*', { count: 'exact', head: true })
+          .eq('style_id', style.id);
+
+        return {
+          ...style,
+          template_count: count || 0
+        };
+      })
     );
 
-    return NextResponse.json(styles);
+    // Sort by template count descending, then display_name ascending
+    stylesWithCounts.sort((a, b) => {
+      if (b.template_count !== a.template_count) {
+        return b.template_count - a.template_count;
+      }
+      return (a.display_name || '').localeCompare(b.display_name || '');
+    });
+
+    return NextResponse.json(stylesWithCounts);
   } catch (error) {
     console.error('Failed to fetch styles:', error);
     return NextResponse.json(

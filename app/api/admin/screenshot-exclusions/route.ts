@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, ScreenshotExclusion } from '@/lib/db';
+import { supabase, type ScreenshotExclusion } from '@/lib/supabase';
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
@@ -19,11 +19,14 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const exclusions = await db.allAsync<ScreenshotExclusion>(
-      `SELECT * FROM screenshot_exclusions ORDER BY created_at DESC`
-    );
+    const { data: exclusions, error } = await supabase
+      .from('screenshot_exclusions')
+      .select('*')
+      .order('created_at', { ascending: false });
 
-    return NextResponse.json({ exclusions });
+    if (error) throw error;
+
+    return NextResponse.json({ exclusions: exclusions || [] });
   } catch (error) {
     console.error('Failed to fetch screenshot exclusions:', error);
     return NextResponse.json(
@@ -56,10 +59,11 @@ export async function POST(request: NextRequest) {
       : 'class';
 
     // Check for duplicate
-    const existing = await db.getAsync<ScreenshotExclusion>(
-      'SELECT id FROM screenshot_exclusions WHERE selector = ?',
-      [normalizedSelector]
-    );
+    const { data: existing } = await supabase
+      .from('screenshot_exclusions')
+      .select('id')
+      .eq('selector', normalizedSelector)
+      .single();
 
     if (existing) {
       return NextResponse.json(
@@ -68,16 +72,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { lastID } = await db.runAsync(
-      `INSERT INTO screenshot_exclusions (selector, selector_type, description, is_active)
-       VALUES (?, ?, ?, 1)`,
-      [normalizedSelector, normalizedType, description || null]
-    );
+    const { data: newExclusion, error: insertError } = await supabase
+      .from('screenshot_exclusions')
+      .insert({
+        selector: normalizedSelector,
+        selector_type: normalizedType,
+        description: description || null,
+        is_active: true
+      })
+      .select()
+      .single();
 
-    const newExclusion = await db.getAsync<ScreenshotExclusion>(
-      'SELECT * FROM screenshot_exclusions WHERE id = ?',
-      [lastID]
-    );
+    if (insertError) throw insertError;
 
     return NextResponse.json({ exclusion: newExclusion }, { status: 201 });
   } catch (error) {
@@ -106,48 +112,42 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const updates: string[] = [];
-    const params: unknown[] = [];
+    const updateData: Record<string, unknown> = {
+      updated_at: new Date().toISOString()
+    };
 
     if (typeof is_active === 'boolean') {
-      updates.push('is_active = ?');
-      params.push(is_active ? 1 : 0);
+      updateData.is_active = is_active;
     }
 
     if (typeof description === 'string') {
-      updates.push('description = ?');
-      params.push(description || null);
+      updateData.description = description || null;
     }
 
     if (typeof selector === 'string' && selector.trim()) {
-      updates.push('selector = ?');
-      params.push(selector.trim());
+      updateData.selector = selector.trim();
     }
 
     if (selector_type && ['class', 'id', 'selector'].includes(selector_type)) {
-      updates.push('selector_type = ?');
-      params.push(selector_type);
+      updateData.selector_type = selector_type;
     }
 
-    if (updates.length === 0) {
+    if (Object.keys(updateData).length === 1) {
+      // Only updated_at, no actual changes
       return NextResponse.json(
         { error: 'No valid fields to update' },
         { status: 400 }
       );
     }
 
-    updates.push('updated_at = datetime("now")');
-    params.push(id);
+    const { data: updated, error: updateError } = await supabase
+      .from('screenshot_exclusions')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
 
-    await db.runAsync(
-      `UPDATE screenshot_exclusions SET ${updates.join(', ')} WHERE id = ?`,
-      params
-    );
-
-    const updated = await db.getAsync<ScreenshotExclusion>(
-      'SELECT * FROM screenshot_exclusions WHERE id = ?',
-      [id]
-    );
+    if (updateError) throw updateError;
 
     return NextResponse.json({ exclusion: updated });
   } catch (error) {
@@ -184,12 +184,14 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    const { changes } = await db.runAsync(
-      'DELETE FROM screenshot_exclusions WHERE id = ?',
-      [id]
-    );
+    const { error: deleteError, count } = await supabase
+      .from('screenshot_exclusions')
+      .delete({ count: 'exact' })
+      .eq('id', id);
 
-    if (changes === 0) {
+    if (deleteError) throw deleteError;
+
+    if (!count || count === 0) {
       return NextResponse.json(
         { error: 'Exclusion not found' },
         { status: 404 }

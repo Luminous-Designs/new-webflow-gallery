@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { searchTemplates } from '@/lib/supabase';
 
 function isAuthorized(request: NextRequest) {
   const authHeader = request.headers.get('authorization');
@@ -20,7 +20,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ results: [] });
     }
 
-    const results = await db.searchTemplates(query.trim(), limit);
+    const results = await searchTemplates(query.trim(), limit);
 
     return NextResponse.json({ results });
   } catch (error) {

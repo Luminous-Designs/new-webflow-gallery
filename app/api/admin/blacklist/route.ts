@@ -4,8 +4,8 @@ import {
   blacklistTemplate,
   unblacklistTemplate,
   extractDomainSlug,
-  BlacklistReason
-} from '@/lib/db';
+  type BlacklistReason
+} from '@/lib/supabase';
 
 export async function GET(request: NextRequest) {
   // Check admin auth
