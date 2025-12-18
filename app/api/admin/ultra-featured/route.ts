@@ -8,39 +8,50 @@ function isAuthorized(request: NextRequest) {
   return authHeader && authHeader === `Bearer ${process.env.ADMIN_PASSWORD}`;
 }
 
-async function getTemplateMetadata(templateId: number) {
+async function attachMetadata(templates: any[]) {
+  if (templates.length === 0) return templates;
+  const templateIds = templates.map((t) => t.id);
+
   const [subcatsData, stylesData] = await Promise.all([
     supabaseAdmin
       .from('template_subcategories')
-      .select('subcategories(name)')
-      .eq('template_id', templateId),
+      .select('template_id, subcategories(name)')
+      .in('template_id', templateIds),
     supabaseAdmin
       .from('template_styles')
-      .select('styles(name)')
-      .eq('template_id', templateId)
+      .select('template_id, styles(name)')
+      .in('template_id', templateIds),
   ]);
 
-  const subcategories =
-    (subcatsData.data || [])
-      .flatMap((row: any) => {
-        const rel = row?.subcategories;
-        if (!rel) return [];
-        if (Array.isArray(rel)) return rel.map((r) => r?.name).filter(Boolean);
-        return rel?.name ? [rel.name] : [];
-      })
-      .filter(Boolean) || [];
+  const subcatsByTemplateId = new Map<number, string[]>();
+  (subcatsData.data || []).forEach((row: any) => {
+    const templateId = row.template_id as number;
+    const rel = row?.subcategories;
+    const names = Array.isArray(rel)
+      ? rel.map((r) => r?.name).filter(Boolean)
+      : rel?.name ? [rel.name] : [];
+    if (!names.length) return;
+    const existing = subcatsByTemplateId.get(templateId) || [];
+    subcatsByTemplateId.set(templateId, [...existing, ...names]);
+  });
 
-  const styles =
-    (stylesData.data || [])
-      .flatMap((row: any) => {
-        const rel = row?.styles;
-        if (!rel) return [];
-        if (Array.isArray(rel)) return rel.map((r) => r?.name).filter(Boolean);
-        return rel?.name ? [rel.name] : [];
-      })
-      .filter(Boolean) || [];
+  const stylesByTemplateId = new Map<number, string[]>();
+  (stylesData.data || []).forEach((row: any) => {
+    const templateId = row.template_id as number;
+    const rel = row?.styles;
+    const names = Array.isArray(rel)
+      ? rel.map((r) => r?.name).filter(Boolean)
+      : rel?.name ? [rel.name] : [];
+    if (!names.length) return;
+    const existing = stylesByTemplateId.get(templateId) || [];
+    stylesByTemplateId.set(templateId, [...existing, ...names]);
+  });
 
-  return { subcategories, styles };
+  return templates.map((template) => ({
+    ...template,
+    subcategories: subcatsByTemplateId.get(template.id) || [],
+    styles: stylesByTemplateId.get(template.id) || [],
+  }));
 }
 
 export async function GET(request: NextRequest) {
@@ -49,8 +60,18 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const { searchParams } = new URL(request.url);
+    const includePool = searchParams.get('include_pool') === 'true';
+
     // Get ultra featured templates
     const ultraFeatured = await getUltraFeaturedTemplates();
+
+    if (!includePool) {
+      return NextResponse.json({
+        ultraFeatured,
+        pool: []
+      });
+    }
 
     // Get featured author IDs
     const { data: featuredAuthors } = await supabaseAdmin
@@ -75,16 +96,7 @@ export async function GET(request: NextRequest) {
       .order('updated_at', { ascending: false });
 
     // Add metadata to each template
-    const pool = await Promise.all(
-      (templates || []).map(async (template) => {
-        const { subcategories, styles } = await getTemplateMetadata(template.id);
-        return {
-          ...template,
-          subcategories,
-          styles
-        };
-      })
-    );
+    const pool = await attachMetadata(templates || []);
 
     return NextResponse.json({
       ultraFeatured,

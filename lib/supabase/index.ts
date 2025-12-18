@@ -553,25 +553,61 @@ export async function getUltraFeaturedTemplates(): Promise<TemplateWithMetadata[
 
   if (error || !data) return [];
 
-  const templates = await Promise.all(
-    data.map(async (item) => {
+  const templates = data
+    .map((item) => {
       const rel = (item as Record<string, unknown>).templates as unknown;
       const template = (Array.isArray(rel) ? rel[0] : rel) as Template | undefined;
       if (!template) return null;
-      const [subcategories, styles] = await Promise.all([
-        getTemplateSubcategories(template.id),
-        getTemplateStyles(template.id),
-      ]);
       return {
         ...template,
         position: (item as Record<string, unknown>).position as number,
-        subcategories,
-        styles,
       };
     })
-  );
+    .filter(Boolean) as Array<Template & { position: number }>;
 
-  return templates.filter(Boolean) as TemplateWithMetadata[];
+  if (templates.length === 0) return [];
+
+  const templateIds = templates.map((template) => template.id);
+  const [subcatsRes, stylesRes] = await Promise.all([
+    supabaseAdmin
+      .from('template_subcategories')
+      .select('template_id, subcategories(name)')
+      .in('template_id', templateIds),
+    supabaseAdmin
+      .from('template_styles')
+      .select('template_id, styles(name)')
+      .in('template_id', templateIds),
+  ]);
+
+  const subcatsByTemplateId = new Map<number, string[]>();
+  (subcatsRes.data || []).forEach((row) => {
+    const templateId = row.template_id as number;
+    const rel = row.subcategories as unknown;
+    const names = Array.isArray(rel)
+      ? rel.map((r) => (r as { name?: string } | null)?.name).filter(Boolean)
+      : (rel as { name?: string } | null)?.name ? [(rel as { name?: string }).name as string] : [];
+    if (!names.length) return;
+    const existing = subcatsByTemplateId.get(templateId) || [];
+    subcatsByTemplateId.set(templateId, [...existing, ...names]);
+  });
+
+  const stylesByTemplateId = new Map<number, string[]>();
+  (stylesRes.data || []).forEach((row) => {
+    const templateId = row.template_id as number;
+    const rel = row.styles as unknown;
+    const names = Array.isArray(rel)
+      ? rel.map((r) => (r as { name?: string } | null)?.name).filter(Boolean)
+      : (rel as { name?: string } | null)?.name ? [(rel as { name?: string }).name as string] : [];
+    if (!names.length) return;
+    const existing = stylesByTemplateId.get(templateId) || [];
+    stylesByTemplateId.set(templateId, [...existing, ...names]);
+  });
+
+  return templates.map((template) => ({
+    ...template,
+    subcategories: subcatsByTemplateId.get(template.id) || [],
+    styles: stylesByTemplateId.get(template.id) || [],
+  }));
 }
 
 /**

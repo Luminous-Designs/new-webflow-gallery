@@ -246,7 +246,7 @@ export function AdminProvider({ children }: AdminProviderProps) {
 
     try {
       setIsUltraLoading(true);
-      const response = await fetch('/api/admin/ultra-featured', {
+      const response = await fetch('/api/admin/ultra-featured?include_pool=false', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (!response.ok) return false;
