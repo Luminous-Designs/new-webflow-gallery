@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { supabaseAdmin } from '@/lib/supabase';
 
 export async function GET(request: NextRequest) {
   try {
@@ -10,7 +10,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Get all featured authors
-    const { data: authors, error } = await supabase
+    const { data: authors, error } = await supabaseAdmin
       .from('featured_authors')
       .select('*')
       .eq('is_active', true)
@@ -19,9 +19,11 @@ export async function GET(request: NextRequest) {
     if (error) throw error;
 
     // Get all unique authors from templates for suggestions
-    const { data: templates } = await supabase
+    const { data: templates, error: templatesError } = await supabaseAdmin
       .from('templates')
-      .select('author_id, author_name, author_avatar');
+      .select('author_id, author_name, author_avatar')
+      .not('author_id', 'is', null);
+    if (templatesError) throw templatesError;
 
     // Count templates per author
     const authorMap = new Map<string, { author_id: string; author_name: string; author_avatar: string | null; template_count: number }>();
@@ -82,7 +84,7 @@ export async function POST(request: NextRequest) {
       featured_at: new Date().toISOString()
     } as unknown as never;
 
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from('featured_authors')
       .upsert(payload, { onConflict: 'author_id' });
 
@@ -116,7 +118,7 @@ export async function DELETE(request: NextRequest) {
 
     // Remove featured author
     const updatePayload = { is_active: false } as unknown as never;
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from('featured_authors')
       .update(updatePayload)
       .eq('author_id', author_id);

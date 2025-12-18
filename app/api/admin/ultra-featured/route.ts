@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase, getUltraFeaturedTemplates, replaceUltraFeaturedTemplates } from '@/lib/supabase';
+import { supabaseAdmin, getUltraFeaturedTemplates, replaceUltraFeaturedTemplates } from '@/lib/supabase';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -10,11 +10,11 @@ function isAuthorized(request: NextRequest) {
 
 async function getTemplateMetadata(templateId: number) {
   const [subcatsData, stylesData] = await Promise.all([
-    supabase
+    supabaseAdmin
       .from('template_subcategories')
       .select('subcategories(name)')
       .eq('template_id', templateId),
-    supabase
+    supabaseAdmin
       .from('template_styles')
       .select('styles(name)')
       .eq('template_id', templateId)
@@ -53,7 +53,7 @@ export async function GET(request: NextRequest) {
     const ultraFeatured = await getUltraFeaturedTemplates();
 
     // Get featured author IDs
-    const { data: featuredAuthors } = await supabase
+    const { data: featuredAuthors } = await supabaseAdmin
       .from('featured_authors')
       .select('author_id')
       .eq('is_active', true);
@@ -68,7 +68,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Get templates from featured authors
-    const { data: templates } = await supabase
+    const { data: templates } = await supabaseAdmin
       .from('templates')
       .select('*')
       .in('author_id', authorIds)

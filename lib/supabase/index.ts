@@ -204,7 +204,7 @@ export async function getTemplate(idOrSlug: number | string): Promise<TemplateWi
  * Get template subcategories
  */
 async function getTemplateSubcategories(templateId: number): Promise<string[]> {
-  const { data } = await supabase
+  const { data } = await supabaseAdmin
     .from('template_subcategories')
     .select('subcategories(name)')
     .eq('template_id', templateId);
@@ -232,7 +232,7 @@ async function getTemplateSubcategories(templateId: number): Promise<string[]> {
  * Get template styles
  */
 async function getTemplateStyles(templateId: number): Promise<string[]> {
-  const { data } = await supabase
+  const { data } = await supabaseAdmin
     .from('template_styles')
     .select('styles(name)')
     .eq('template_id', templateId);
@@ -502,7 +502,7 @@ export async function linkTemplateStyle(templateId: number, styleId: number): Pr
  * Get all featured authors
  */
 export async function getFeaturedAuthors(): Promise<FeaturedAuthor[]> {
-  const { data, error } = await supabase
+  const { data, error } = await supabaseAdmin
     .from('featured_authors')
     .select('*')
     .eq('is_active', true)
@@ -516,7 +516,7 @@ export async function getFeaturedAuthors(): Promise<FeaturedAuthor[]> {
  * Add a featured author
  */
 export async function addFeaturedAuthor(authorId: string, authorName: string): Promise<FeaturedAuthor | null> {
-  const { data, error } = await supabase
+  const { data, error } = await supabaseAdmin
     .from('featured_authors')
     .upsert({ author_id: authorId, author_name: authorName, is_active: true }, { onConflict: 'author_id' })
     .select()
@@ -530,7 +530,7 @@ export async function addFeaturedAuthor(authorId: string, authorName: string): P
  * Remove a featured author
  */
 export async function removeFeaturedAuthor(authorId: string): Promise<boolean> {
-  const { error } = await supabase
+  const { error } = await supabaseAdmin
     .from('featured_authors')
     .update({ is_active: false })
     .eq('author_id', authorId);
@@ -546,7 +546,7 @@ export async function removeFeaturedAuthor(authorId: string): Promise<boolean> {
  * Get ultra featured templates
  */
 export async function getUltraFeaturedTemplates(): Promise<TemplateWithMetadata[]> {
-  const { data, error } = await supabase
+  const { data, error } = await supabaseAdmin
     .from('ultra_featured_templates')
     .select('position, templates(*)')
     .order('position');
@@ -579,7 +579,7 @@ export async function getUltraFeaturedTemplates(): Promise<TemplateWithMetadata[
  */
 export async function replaceUltraFeaturedTemplates(templateIds: number[]): Promise<void> {
   // Delete existing
-  await supabase.from('ultra_featured_templates').delete().neq('id', 0);
+  await supabaseAdmin.from('ultra_featured_templates').delete().neq('id', 0);
 
   // Insert new
   const entries = templateIds.map((templateId, index) => ({
@@ -588,7 +588,7 @@ export async function replaceUltraFeaturedTemplates(templateIds: number[]): Prom
   }));
 
   if (entries.length > 0) {
-    await supabase.from('ultra_featured_templates').insert(entries);
+    await supabaseAdmin.from('ultra_featured_templates').insert(entries);
   }
 }
 
@@ -596,7 +596,7 @@ export async function replaceUltraFeaturedTemplates(templateIds: number[]): Prom
  * Search templates for ultra-featured curation
  */
 export async function searchTemplates(query: string, limit = 10): Promise<TemplateWithMetadata[]> {
-  const { data, error } = await supabase
+  const { data, error } = await supabaseAdmin
     .from('templates')
     .select('*')
     .or(`name.ilike.%${query}%,slug.ilike.%${query}%,author_name.ilike.%${query}%`)
