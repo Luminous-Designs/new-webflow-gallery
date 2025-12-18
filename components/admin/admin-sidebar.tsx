@@ -13,6 +13,7 @@ import {
   Sparkles,
   Camera,
   Server,
+  Database,
   Image as ImageIcon,
   Star,
   ChevronLeft,
@@ -37,6 +38,7 @@ export type AdminSection =
   | 'ultra'
   | 'system'
   | 'storage'
+  | 'supabase-explorer'
   | 'sync'
   | 'visitors'
   | 'purchases';
@@ -169,6 +171,11 @@ export function AdminSidebar({
           id: 'system',
           label: 'Resources',
           icon: Server,
+        },
+        {
+          id: 'supabase-explorer',
+          label: 'Supabase Explorer',
+          icon: Database,
         },
         {
           id: 'storage',

@@ -209,7 +209,23 @@ async function getTemplateSubcategories(templateId: number): Promise<string[]> {
     .select('subcategories(name)')
     .eq('template_id', templateId);
 
-  return data?.map(d => (d.subcategories as { name: string })?.name).filter(Boolean) || [];
+  const rows = (data || []) as Array<Record<string, unknown>>;
+  return rows
+    .flatMap((row) => {
+      const rel = row.subcategories as unknown;
+      if (!rel) return [];
+      if (Array.isArray(rel)) {
+        return rel
+          .map((r) => (r && typeof r === 'object' ? ((r as Record<string, unknown>).name as string | undefined) : undefined))
+          .filter((v): v is string => !!v);
+      }
+      if (typeof rel === 'object') {
+        const name = (rel as Record<string, unknown>).name as string | undefined;
+        return name ? [name] : [];
+      }
+      return [];
+    })
+    .filter(Boolean);
 }
 
 /**
@@ -221,7 +237,23 @@ async function getTemplateStyles(templateId: number): Promise<string[]> {
     .select('styles(name)')
     .eq('template_id', templateId);
 
-  return data?.map(d => (d.styles as { name: string })?.name).filter(Boolean) || [];
+  const rows = (data || []) as Array<Record<string, unknown>>;
+  return rows
+    .flatMap((row) => {
+      const rel = row.styles as unknown;
+      if (!rel) return [];
+      if (Array.isArray(rel)) {
+        return rel
+          .map((r) => (r && typeof r === 'object' ? ((r as Record<string, unknown>).name as string | undefined) : undefined))
+          .filter((v): v is string => !!v);
+      }
+      if (typeof rel === 'object') {
+        const name = (rel as Record<string, unknown>).name as string | undefined;
+        return name ? [name] : [];
+      }
+      return [];
+    })
+    .filter(Boolean);
 }
 
 /**
@@ -523,21 +555,23 @@ export async function getUltraFeaturedTemplates(): Promise<TemplateWithMetadata[
 
   const templates = await Promise.all(
     data.map(async (item) => {
-      const template = item.templates as Template;
+      const rel = (item as Record<string, unknown>).templates as unknown;
+      const template = (Array.isArray(rel) ? rel[0] : rel) as Template | undefined;
+      if (!template) return null;
       const [subcategories, styles] = await Promise.all([
         getTemplateSubcategories(template.id),
         getTemplateStyles(template.id),
       ]);
       return {
         ...template,
-        position: item.position,
+        position: (item as Record<string, unknown>).position as number,
         subcategories,
         styles,
       };
     })
   );
 
-  return templates;
+  return templates.filter(Boolean) as TemplateWithMetadata[];
 }
 
 /**

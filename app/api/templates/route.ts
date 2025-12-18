@@ -1,281 +1,258 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { supabaseAdmin } from '@/lib/supabase';
+
+export const runtime = 'nodejs';
+export const revalidate = 60;
+
+const MAX_LIMIT = 50;
+
+const TEMPLATE_CARD_SELECT = `
+  id,
+  template_id,
+  name,
+  slug,
+  author_name,
+  author_id,
+  storefront_url,
+  live_preview_url,
+  designer_preview_url,
+  price,
+  short_description,
+  screenshot_path,
+  screenshot_thumbnail_path,
+  is_featured,
+  is_cms,
+  is_ecommerce,
+  screenshot_url,
+  is_alternate_homepage,
+  alternate_homepage_path,
+  scraped_at,
+  created_at,
+  updated_at
+`;
+
+type TemplateRow = Record<string, unknown> & { id: number; author_id?: string | null };
+
+function jsonResponse(body: unknown, init?: Parameters<typeof NextResponse.json>[1]) {
+  const res = NextResponse.json(body, init);
+  res.headers.set('Cache-Control', 'public, max-age=0, s-maxage=60, stale-while-revalidate=300');
+  return res;
+}
+
+async function getFeaturedAuthorIdSet(): Promise<Set<string>> {
+  const { data, error } = await supabaseAdmin
+    .from('featured_authors')
+    .select('author_id')
+    .eq('is_active', true);
+  if (error) return new Set();
+  return new Set((data || []).map(r => r.author_id));
+}
+
+async function attachSubcategoriesAndStyles(
+  templates: TemplateRow[]
+): Promise<Array<TemplateRow & { subcategories: string[]; styles: string[] }>> {
+  if (templates.length === 0) return [];
+
+  const templateIds = templates.map(t => t.id);
+  const [subcatRes, styleRes] = await Promise.all([
+    supabaseAdmin
+      .from('template_subcategories')
+      .select('template_id, subcategories(name, display_name)')
+      .in('template_id', templateIds),
+    supabaseAdmin
+      .from('template_styles')
+      .select('template_id, styles(name, display_name)')
+      .in('template_id', templateIds),
+  ]);
+
+  const subcatsByTemplateId = new Map<number, string[]>();
+  for (const row of subcatRes.data || []) {
+    const templateId = row.template_id as number;
+    const label =
+      (row.subcategories as { display_name?: string; name?: string } | null)?.display_name ||
+      (row.subcategories as { name?: string } | null)?.name;
+    if (!label) continue;
+    const existing = subcatsByTemplateId.get(templateId) || [];
+    existing.push(label);
+    subcatsByTemplateId.set(templateId, existing);
+  }
+
+  const stylesByTemplateId = new Map<number, string[]>();
+  for (const row of styleRes.data || []) {
+    const templateId = row.template_id as number;
+    const label =
+      (row.styles as { display_name?: string; name?: string } | null)?.display_name ||
+      (row.styles as { name?: string } | null)?.name;
+    if (!label) continue;
+    const existing = stylesByTemplateId.get(templateId) || [];
+    existing.push(label);
+    stylesByTemplateId.set(templateId, existing);
+  }
+
+  return templates.map(t => ({
+    ...t,
+    subcategories: subcatsByTemplateId.get(t.id) || [],
+    styles: stylesByTemplateId.get(t.id) || [],
+  }));
+}
 
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const rawPage = parseInt(searchParams.get('page') || '1', 10);
     const rawLimit = parseInt(searchParams.get('limit') || '20', 10);
-    const MAX_LIMIT = 50;
 
     const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1;
     const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_LIMIT) : 20;
+    const offset = (page - 1) * limit;
+
     const subcategory = searchParams.get('subcategory');
     const style = searchParams.get('style');
     const author = searchParams.get('author');
     const featured = searchParams.get('featured') === 'true';
     const collection = searchParams.get('collection');
 
-    const offset = (page - 1) * limit;
+    const featuredAuthorIds = await getFeaturedAuthorIdSet();
+    const featuredAuthorIdList = featured ? Array.from(featuredAuthorIds) : null;
 
-    console.log('[Templates API] Request params:', {
-      page,
-      limit,
-      offset,
-      subcategory,
-      style,
-      author,
-      featured,
-      collection
-    });
-
-    // Handle ultra-featured collection
     if (collection === 'ultra') {
-      const { data: ultraFeatured, error: ultraError } = await supabase
+      const { data, count: total, error } = await supabaseAdmin
         .from('ultra_featured_templates')
-        .select(`
-          position,
-          templates (
-            id,
-            template_id,
-            name,
-            slug,
-            author_name,
-            author_id,
-            storefront_url,
-            live_preview_url,
-            designer_preview_url,
-            price,
-            short_description,
-            screenshot_path,
-            screenshot_thumbnail_path,
-            is_featured,
-            is_cms,
-            is_ecommerce,
-            created_at,
-            updated_at
-          )
-        `)
+        .select(`position, templates!inner(${TEMPLATE_CARD_SELECT})`, { count: 'exact' })
         .order('position')
         .range(offset, offset + limit - 1);
 
-      if (ultraError) {
-        console.error('Ultra featured error:', ultraError);
-        throw ultraError;
-      }
+      if (error) throw error;
 
-      const { count: totalUltra } = await supabase
-        .from('ultra_featured_templates')
-        .select('*', { count: 'exact', head: true });
-
-      // Get featured authors for checking
-      const { data: featuredAuthors } = await supabase
-        .from('featured_authors')
-        .select('author_id')
-        .eq('is_active', true);
-      const featuredAuthorIds = new Set(featuredAuthors?.map(a => a.author_id) || []);
-
-      // Process templates with metadata
-      const templates = await Promise.all(
-        (ultraFeatured || []).map(async (uf) => {
-          const template = uf.templates as Record<string, unknown>;
+      const templatesOnly = (data || [])
+        .map((row) => {
+          const rel = (row as unknown as { templates?: unknown })?.templates;
+          const template: TemplateRow | null = Array.isArray(rel) ? (rel[0] as TemplateRow | undefined) || null : (rel as TemplateRow | null);
           if (!template) return null;
-
-          // Get subcategories
-          const { data: subcats } = await supabase
-            .from('template_subcategories')
-            .select('subcategories(name)')
-            .eq('template_id', template.id as number);
-
-          // Get styles
-          const { data: templateStyles } = await supabase
-            .from('template_styles')
-            .select('styles(name)')
-            .eq('template_id', template.id as number);
-
           return {
             ...template,
-            position: uf.position,
-            subcategories: subcats?.map(s => (s.subcategories as { name: string })?.name).filter(Boolean) || [],
-            styles: templateStyles?.map(s => (s.styles as { name: string })?.name).filter(Boolean) || [],
-            is_featured_author: featuredAuthorIds.has(template.author_id as string)
-          };
+            position: (row as { position: number }).position,
+          } as TemplateRow & { position: number };
         })
-      );
+        .filter(Boolean) as Array<TemplateRow & { position: number }>;
 
-      const total = totalUltra || 0;
-      const totalPages = Math.ceil(total / limit);
+      const templatesWithMeta = await attachSubcategoriesAndStyles(templatesOnly);
+      const enhanced = templatesWithMeta.map((t) => ({
+        ...t,
+        is_featured_author: !!t.author_id && featuredAuthorIds.has(t.author_id),
+      }));
 
-      return NextResponse.json({
-        templates: templates.filter(Boolean),
+      const totalRows = total || 0;
+      const totalPages = Math.ceil(totalRows / limit);
+
+      return jsonResponse({
+        templates: enhanced,
         pagination: {
           page,
           limit,
-          total,
+          total: totalRows,
           totalPages,
           hasNext: page < totalPages,
-          hasPrev: page > 1
-        }
+          hasPrev: page > 1,
+        },
       });
     }
 
-    // Build main query
-    let query = supabase.from('templates').select('*', { count: 'exact' });
+    let templates: TemplateRow[] = [];
+    let total = 0;
 
-    // Apply filters
-    if (author) {
-      query = query.eq('author_id', author);
-    }
-
-    // For subcategory filter, we need to get template IDs first
-    let templateIdsFromSubcategory: Set<number> | null = null;
     if (subcategory) {
-      const { data: subcatData } = await supabase
+      const { data: subcat, error: subcatError } = await supabaseAdmin
         .from('subcategories')
         .select('id')
         .eq('slug', subcategory)
         .single();
-
-      if (subcatData) {
-        const { data: templateSubcats } = await supabase
-          .from('template_subcategories')
-          .select('template_id')
-          .eq('subcategory_id', subcatData.id);
-
-        templateIdsFromSubcategory = new Set(templateSubcats?.map(ts => ts.template_id) || []);
+      if (subcatError || !subcat) {
+        return jsonResponse({
+          templates: [],
+          pagination: { page, limit, total: 0, totalPages: 0, hasNext: false, hasPrev: page > 1 },
+        });
       }
-    }
 
-    // For style filter
-    let templateIdsFromStyle: Set<number> | null = null;
-    if (style) {
-      const { data: styleData } = await supabase
+      let query = supabaseAdmin
+        .from('template_subcategories')
+        .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`, { count: 'exact' })
+        .eq('subcategory_id', subcat.id)
+        .order('created_at', { foreignTable: 'templates', ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (author) query = query.eq('templates.author_id', author);
+      if (featuredAuthorIdList && featuredAuthorIdList.length > 0) {
+        query = query.in('templates.author_id', featuredAuthorIdList);
+      }
+
+      const { data, count, error } = await query;
+      if (error) throw error;
+      total = count || 0;
+      templates = (data || [])
+        .map((row) => {
+          const rel = (row as unknown as { templates?: unknown })?.templates;
+          return Array.isArray(rel) ? (rel[0] as TemplateRow | undefined) : (rel as TemplateRow | undefined);
+        })
+        .filter(Boolean) as TemplateRow[];
+    } else if (style) {
+      const { data: styleRow, error: styleError } = await supabaseAdmin
         .from('styles')
         .select('id')
         .eq('slug', style)
         .single();
-
-      if (styleData) {
-        const { data: templateStyleData } = await supabase
-          .from('template_styles')
-          .select('template_id')
-          .eq('style_id', styleData.id);
-
-        templateIdsFromStyle = new Set(templateStyleData?.map(ts => ts.template_id) || []);
+      if (styleError || !styleRow) {
+        return jsonResponse({
+          templates: [],
+          pagination: { page, limit, total: 0, totalPages: 0, hasNext: false, hasPrev: page > 1 },
+        });
       }
-    }
 
-    // For featured filter
-    let featuredAuthorIds: Set<string> | null = null;
-    if (featured) {
-      const { data: featuredAuthors } = await supabase
-        .from('featured_authors')
-        .select('author_id')
-        .eq('is_active', true);
+      let query = supabaseAdmin
+        .from('template_styles')
+        .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`, { count: 'exact' })
+        .eq('style_id', styleRow.id)
+        .order('created_at', { foreignTable: 'templates', ascending: false })
+        .range(offset, offset + limit - 1);
 
-      featuredAuthorIds = new Set(featuredAuthors?.map(a => a.author_id) || []);
-    }
-
-    // Get all featured authors for display
-    const { data: allFeaturedAuthors } = await supabase
-      .from('featured_authors')
-      .select('author_id')
-      .eq('is_active', true);
-    const allFeaturedAuthorIds = new Set(allFeaturedAuthors?.map(a => a.author_id) || []);
-
-    // Execute main query
-    const { data: templates, count, error } = await query
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
-
-    if (error) {
-      console.error('Templates query error:', error);
-      throw error;
-    }
-
-    // Filter templates based on subcategory/style/featured
-    let filteredTemplates = templates || [];
-
-    if (templateIdsFromSubcategory) {
-      filteredTemplates = filteredTemplates.filter(t => templateIdsFromSubcategory!.has(t.id));
-    }
-
-    if (templateIdsFromStyle) {
-      filteredTemplates = filteredTemplates.filter(t => templateIdsFromStyle!.has(t.id));
-    }
-
-    if (featuredAuthorIds) {
-      filteredTemplates = filteredTemplates.filter(t => t.author_id && featuredAuthorIds!.has(t.author_id));
-    }
-
-    // Enhance templates with metadata
-    const enhancedTemplates = await Promise.all(
-      filteredTemplates.map(async (template) => {
-        // Get subcategories
-        const { data: subcats } = await supabase
-          .from('template_subcategories')
-          .select('subcategories(name)')
-          .eq('template_id', template.id);
-
-        // Get styles
-        const { data: templateStyles } = await supabase
-          .from('template_styles')
-          .select('styles(name)')
-          .eq('template_id', template.id);
-
-        return {
-          ...template,
-          subcategories: subcats?.map(s => (s.subcategories as { name: string })?.name).filter(Boolean) || [],
-          styles: templateStyles?.map(s => (s.styles as { name: string })?.name).filter(Boolean) || [],
-          is_featured_author: template.author_id ? allFeaturedAuthorIds.has(template.author_id) : false
-        };
-      })
-    );
-
-    // Sort: featured authors first, then by created_at
-    enhancedTemplates.sort((a, b) => {
-      if (a.is_featured_author && !b.is_featured_author) return -1;
-      if (!a.is_featured_author && b.is_featured_author) return 1;
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-    });
-
-    // Calculate proper total for filtered results
-    let total = count || 0;
-    if (subcategory || style || featured) {
-      // Recalculate total for filtered results
-      let countQuery = supabase.from('templates').select('id', { count: 'exact', head: true });
-      if (author) {
-        countQuery = countQuery.eq('author_id', author);
+      if (author) query = query.eq('templates.author_id', author);
+      if (featuredAuthorIdList && featuredAuthorIdList.length > 0) {
+        query = query.in('templates.author_id', featuredAuthorIdList);
       }
-      const { count: filteredCount } = await countQuery;
 
-      // Apply same filters
-      if (templateIdsFromSubcategory) {
-        total = templateIdsFromSubcategory.size;
-      } else if (templateIdsFromStyle) {
-        total = templateIdsFromStyle.size;
-      } else if (featuredAuthorIds) {
-        const { count: featuredCount } = await supabase
-          .from('templates')
-          .select('id', { count: 'exact', head: true })
-          .in('author_id', Array.from(featuredAuthorIds));
-        total = featuredCount || 0;
-      } else {
-        total = filteredCount || 0;
+      const { data, count, error } = await query;
+      if (error) throw error;
+      total = count || 0;
+      templates = (data || [])
+        .map((row) => {
+          const rel = (row as unknown as { templates?: unknown })?.templates;
+          return Array.isArray(rel) ? (rel[0] as TemplateRow | undefined) : (rel as TemplateRow | undefined);
+        })
+        .filter(Boolean) as TemplateRow[];
+    } else {
+      let query = supabaseAdmin.from('templates').select(TEMPLATE_CARD_SELECT, { count: 'exact' });
+      if (author) query = query.eq('author_id', author);
+      if (featuredAuthorIdList && featuredAuthorIdList.length > 0) {
+        query = query.in('author_id', featuredAuthorIdList);
       }
+
+      const { data, count, error } = await query
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+      if (error) throw error;
+      total = count || 0;
+      templates = (data || []) as TemplateRow[];
     }
+
+    const templatesWithMeta = await attachSubcategoriesAndStyles(templates);
+    const enhancedTemplates = templatesWithMeta.map((t) => ({
+      ...t,
+      is_featured_author: !!t.author_id && featuredAuthorIds.has(t.author_id),
+    }));
 
     const totalPages = Math.ceil(total / limit);
 
-    console.log('[Templates API] Pagination info:', {
-      total,
-      totalPages,
-      currentPage: page,
-      hasNext: page < totalPages,
-      returnedCount: enhancedTemplates.length
-    });
-
-    return NextResponse.json({
+    return jsonResponse({
       templates: enhancedTemplates,
       pagination: {
         page,
@@ -283,25 +260,23 @@ export async function GET(request: NextRequest) {
         total,
         totalPages,
         hasNext: page < totalPages,
-        hasPrev: page > 1
-      }
+        hasPrev: page > 1,
+      },
     });
-
   } catch (error) {
     console.error('Templates API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
 
-// Get single template
 export async function POST(request: NextRequest) {
   try {
-    const { template_id } = await request.json();
+    const { template_id } = (await request.json()) as { template_id?: string };
+    if (!template_id) {
+      return NextResponse.json({ error: 'template_id required' }, { status: 400 });
+    }
 
-    const { data: template, error } = await supabase
+    const { data: template, error } = await supabaseAdmin
       .from('templates')
       .select('*')
       .eq('template_id', template_id)
@@ -311,36 +286,29 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Template not found' }, { status: 404 });
     }
 
-    // Get subcategories
-    const { data: subcats } = await supabase
-      .from('template_subcategories')
-      .select('subcategories(name)')
-      .eq('template_id', template.id);
+    const [subcats, styles, features] = await Promise.all([
+      supabaseAdmin.from('template_subcategories').select('subcategories(name, display_name)').eq('template_id', template.id),
+      supabaseAdmin.from('template_styles').select('styles(name, display_name)').eq('template_id', template.id),
+      supabaseAdmin.from('template_features').select('features(name, display_name)').eq('template_id', template.id),
+    ]);
 
-    // Get styles
-    const { data: templateStyles } = await supabase
-      .from('template_styles')
-      .select('styles(name)')
-      .eq('template_id', template.id);
-
-    // Get features
-    const { data: templateFeatures } = await supabase
-      .from('template_features')
-      .select('features(name)')
-      .eq('template_id', template.id);
-
-    return NextResponse.json({
+    return jsonResponse({
       ...template,
-      subcategories: subcats?.map(s => (s.subcategories as { name: string })?.name).filter(Boolean) || [],
-      styles: templateStyles?.map(s => (s.styles as { name: string })?.name).filter(Boolean) || [],
-      features: templateFeatures?.map(f => (f.features as { name: string })?.name).filter(Boolean) || []
+      subcategories: (subcats.data || [])
+        .map((s) => (s.subcategories as { display_name?: string; name?: string } | null)?.display_name
+          || (s.subcategories as { name?: string } | null)?.name)
+        .filter(Boolean),
+      styles: (styles.data || [])
+        .map((s) => (s.styles as { display_name?: string; name?: string } | null)?.display_name
+          || (s.styles as { name?: string } | null)?.name)
+        .filter(Boolean),
+      features: (features.data || [])
+        .map((f) => (f.features as { display_name?: string; name?: string } | null)?.display_name
+          || (f.features as { name?: string } | null)?.name)
+        .filter(Boolean),
     });
-
   } catch (error) {
     console.error('Template API error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

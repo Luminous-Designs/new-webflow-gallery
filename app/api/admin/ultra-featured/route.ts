@@ -20,8 +20,25 @@ async function getTemplateMetadata(templateId: number) {
       .eq('template_id', templateId)
   ]);
 
-  const subcategories = subcatsData.data?.map(d => (d.subcategories as { name: string })?.name).filter(Boolean) || [];
-  const styles = stylesData.data?.map(d => (d.styles as { name: string })?.name).filter(Boolean) || [];
+  const subcategories =
+    (subcatsData.data || [])
+      .flatMap((row: any) => {
+        const rel = row?.subcategories;
+        if (!rel) return [];
+        if (Array.isArray(rel)) return rel.map((r) => r?.name).filter(Boolean);
+        return rel?.name ? [rel.name] : [];
+      })
+      .filter(Boolean) || [];
+
+  const styles =
+    (stylesData.data || [])
+      .flatMap((row: any) => {
+        const rel = row?.styles;
+        if (!rel) return [];
+        if (Array.isArray(rel)) return rel.map((r) => r?.name).filter(Boolean);
+        return rel?.name ? [rel.name] : [];
+      })
+      .filter(Boolean) || [];
 
   return { subcategories, styles };
 }

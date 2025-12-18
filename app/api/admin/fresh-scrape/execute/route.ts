@@ -1,14 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { supabaseAdmin } from '@/lib/supabase';
 import { FreshScraper, FreshScraperConfig, ScrapeState, clampFreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 
-function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
-  if (!raw) return fallback;
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
+function safeJsonParse<T>(raw: unknown, fallback: T): T {
+  if (raw === null || raw === undefined) return fallback;
+  if (typeof raw === 'object') return raw as T;
+  if (typeof raw === 'string') {
+    if (!raw.trim()) return fallback;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return fallback;
+    }
   }
+  return fallback;
 }
 
 async function readJsonBody(
@@ -70,6 +75,14 @@ interface ScraperEvents {
     isFeaturedAuthor: boolean;
     timestamp: string;
   }>;
+  supabase: {
+    queued: number;
+    inFlight: boolean;
+    successful: number;
+    failed: number;
+    lastError: string | null;
+    recent: Array<{ slug: string; status: string; error?: string }>;
+  } | null;
   progress: {
     processed: number;
     successful: number;
@@ -84,6 +97,7 @@ const scraperEvents: ScraperEvents = {
   logs: [],
   currentBatch: [],
   recentScreenshots: [],
+  supabase: null,
   progress: { processed: 0, successful: 0, failed: 0, total: 0 },
   realTimeState: null,
   scrapeState: null
@@ -130,11 +144,15 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: 'Scraper already running' }, { status: 400 });
         }
 
-        // Get state config
-        const state = await db.getAsync<{ config: string }>(
-          'SELECT config FROM fresh_scrape_state WHERE id = ?',
-          [stateId]
-        );
+        // Get state config (Supabase)
+        const { data: state, error: stateError } = await supabaseAdmin
+          .from('fresh_scrape_state')
+          .select('config')
+          .eq('id', stateId)
+          .single();
+        if (stateError) {
+          return NextResponse.json({ error: `Failed to load scrape config: ${stateError.message}` }, { status: 500 });
+        }
 
 	        const baseDefaults: FreshScraperConfig = {
           concurrency: 5,
@@ -154,7 +172,8 @@ export async function POST(request: NextRequest) {
           thumbnailWebpQuality: 60
         };
 
-	        const persistedConfig = safeJsonParse(state?.config, {});
+	        const stateConfigRaw = (state as unknown as { config?: unknown } | null)?.config;
+	        const persistedConfig = safeJsonParse(stateConfigRaw, {});
 	        const rawConfig = {
 	          ...persistedConfig,
 	          ...(config || {})
@@ -168,6 +187,7 @@ export async function POST(request: NextRequest) {
         scraperEvents.logs = [];
         scraperEvents.currentBatch = [];
         scraperEvents.recentScreenshots = [];
+        scraperEvents.supabase = null;
         scraperEvents.progress = { processed: 0, successful: 0, failed: 0, total: batchUrls.length };
         scraperEvents.realTimeState = null;
 
@@ -211,14 +231,15 @@ export async function POST(request: NextRequest) {
             scraperEvents.recentScreenshots = scraperEvents.recentScreenshots.slice(0, 100);
           }
 
-          // Store in database
+          // Store in Supabase (drives the live screenshot feed)
           try {
-            await db.runAsync(
-              `INSERT INTO fresh_scrape_screenshots
-                (fresh_scrape_id, template_name, template_slug, screenshot_thumbnail_path, is_featured_author)
-              VALUES (?, ?, ?, ?, ?)`,
-              [stateId, data.name, data.slug, data.thumbnailPath, data.isFeaturedAuthor ? 1 : 0]
-            );
+            await supabaseAdmin.from('fresh_scrape_screenshots').insert({
+              fresh_scrape_id: stateId,
+              template_name: data.name,
+              template_slug: data.slug,
+              screenshot_thumbnail_path: data.thumbnailPath,
+              is_featured_author: data.isFeaturedAuthor,
+            });
           } catch {
             // Ignore
           }
@@ -226,6 +247,10 @@ export async function POST(request: NextRequest) {
 
         activeScraper.on('progress', (data) => {
           scraperEvents.progress = data;
+        });
+
+        activeScraper.on('supabase-state', (data) => {
+          scraperEvents.supabase = data;
         });
 
         activeScraper.on('realtime-state', (data) => {
@@ -267,15 +292,37 @@ export async function POST(request: NextRequest) {
             const result = await activeScraper!.scrapeBatch(batchUrls);
 
             // Update state progress
-            await db.runAsync(
-              `UPDATE fresh_scrape_state SET
-                ${isFeatured ? 'featured_processed = featured_processed + ?' : 'regular_processed = regular_processed + ?'},
-                ${isFeatured ? 'featured_successful = featured_successful + ?' : 'regular_successful = regular_successful + ?'},
-                ${isFeatured ? 'featured_failed = featured_failed + ?' : 'regular_failed = regular_failed + ?'},
-                updated_at = datetime('now')
-              WHERE id = ?`,
-              [result.processed, result.successful, result.failed, stateId]
-            );
+            const { data: currentStateRaw } = await supabaseAdmin
+              .from('fresh_scrape_state')
+              .select('featured_processed, featured_successful, featured_failed, regular_processed, regular_successful, regular_failed')
+              .eq('id', stateId)
+              .single();
+
+            const currentState = currentStateRaw as unknown as {
+              featured_processed?: number | null;
+              featured_successful?: number | null;
+              featured_failed?: number | null;
+              regular_processed?: number | null;
+              regular_successful?: number | null;
+              regular_failed?: number | null;
+            } | null;
+
+            const update = {
+              updated_at: new Date().toISOString(),
+              ...(isFeatured
+                ? {
+                  featured_processed: (currentState?.featured_processed || 0) + result.processed,
+                  featured_successful: (currentState?.featured_successful || 0) + result.successful,
+                  featured_failed: (currentState?.featured_failed || 0) + result.failed,
+                }
+                : {
+                  regular_processed: (currentState?.regular_processed || 0) + result.processed,
+                  regular_successful: (currentState?.regular_successful || 0) + result.successful,
+                  regular_failed: (currentState?.regular_failed || 0) + result.failed,
+                }),
+            };
+
+            await supabaseAdmin.from('fresh_scrape_state').update(update).eq('id', stateId);
 
             addLog('info', `Batch complete: ${result.successful} successful, ${result.failed} failed`);
           } catch (error) {
@@ -386,11 +433,13 @@ export async function GET(request: NextRequest) {
         // Return real-time events including actual scraper state
         const realState = activeScraper?.getRealTimeState() || scraperEvents.realTimeState;
         const scrapeState = activeScraper?.getScrapeState() || scraperEvents.scrapeState;
+        const supabaseState = activeScraper?.getSupabaseWriteState() || scraperEvents.supabase;
         return NextResponse.json({
           isRunning: !!activeScraper,
           logs: scraperEvents.logs.slice(0, 50),
           currentBatch: activeScraper?.getCurrentBatch() || scraperEvents.currentBatch,
           recentScreenshots: scraperEvents.recentScreenshots.slice(0, 30),
+          supabase: supabaseState,
           progress: scraperEvents.progress,
           realTimeState: realState,
           scrapeState: scrapeState

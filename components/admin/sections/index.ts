@@ -10,3 +10,4 @@ export { VisitorsSection } from './visitors-section';
 export { PurchasesSection } from './purchases-section';
 export { StorageSection } from './storage-section';
 export { SyncSection } from './sync-section';
+export { SupabaseExplorerSection } from './supabase-explorer-section';

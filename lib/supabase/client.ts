@@ -27,7 +27,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // Create client for public/anon access (read operations)
-export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_ANON_KEY, {
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
     persistSession: false,
     autoRefreshToken: false,
@@ -41,7 +41,7 @@ export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_ANON_KEY, 
 
 // Create admin client for service role operations (write operations during scraping)
 export const supabaseAdmin = SUPABASE_SERVICE_KEY
-  ? createClient<Database>(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
       auth: {
         persistSession: false,
         autoRefreshToken: false,

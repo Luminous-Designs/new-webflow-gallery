@@ -1,17 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { supabaseAdmin as supabase } from '@/lib/supabase';
 import { promises as fs } from 'fs';
 import path from 'path';
 import axios from 'axios';
 import { clampFreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 
-function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
-  if (!raw) return fallback;
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
+function safeJsonParse<T>(raw: unknown, fallback: T): T {
+  if (raw === null || raw === undefined) return fallback;
+  if (typeof raw === 'object') return raw as T;
+  if (typeof raw === 'string') {
+    if (!raw.trim()) return fallback;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return fallback;
+    }
   }
+  return fallback;
 }
 
 async function readJsonBody(
@@ -137,20 +142,107 @@ async function getLastScreenshotForScrape(stateId: number): Promise<{
   };
 }
 
-// Helper to fetch sitemap URLs
-async function fetchSitemapUrls(): Promise<string[]> {
-  const sitemapUrl = 'https://templates.webflow.com/sitemap.xml';
-  const response = await axios.get(sitemapUrl);
-  const xml = response.data;
+interface SitemapEntry {
+  url: string;
+  slug: string;
+  lastmod: string | null;
+  lastmodMs: number | null;
+}
 
-  const htmlTemplateRegex = /<loc>(https:\/\/templates\.webflow\.com\/html\/[^<]+)<\/loc>/g;
-  const urls: string[] = [];
-  let match;
-  while ((match = htmlTemplateRegex.exec(xml)) !== null) {
-    urls.push(match[1]);
+function parseSitemapEntries(xml: string): SitemapEntry[] {
+  const entries: SitemapEntry[] = [];
+  const urlBlockRegex = /<url>([\s\S]*?)<\/url>/g;
+  const locRegex = /<loc>([^<]+)<\/loc>/;
+  const lastmodRegex = /<lastmod>([^<]+)<\/lastmod>/;
+
+  let match: RegExpExecArray | null;
+  while ((match = urlBlockRegex.exec(xml)) !== null) {
+    const block = match[1] || '';
+    const locMatch = locRegex.exec(block);
+    if (!locMatch) continue;
+    const url = locMatch[1].trim();
+    if (!url.startsWith('https://templates.webflow.com/html/')) continue;
+    const slug = url.split('/').filter(Boolean).pop() || '';
+    if (!slug) continue;
+
+    const lastmodMatch = lastmodRegex.exec(block);
+    const lastmod = lastmodMatch ? lastmodMatch[1].trim() : null;
+    const lastmodMs = lastmod ? Date.parse(lastmod) : null;
+
+    entries.push({ url, slug, lastmod, lastmodMs: Number.isFinite(lastmodMs) ? lastmodMs : null });
   }
 
-  return urls;
+  return entries;
+}
+
+async function fetchSitemapEntries(): Promise<SitemapEntry[]> {
+  const sitemapUrl = 'https://templates.webflow.com/sitemap.xml';
+  const response = await axios.get(sitemapUrl, { timeout: 30000 });
+  const xml = response.data as string;
+  return parseSitemapEntries(xml);
+}
+
+async function fetchAllTemplateScrapeIndex(): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const pageSize = 1000;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from('templates')
+      .select('slug, scraped_at')
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    for (const row of data) {
+      const slug = row.slug as string | null;
+      const scrapedAt = row.scraped_at as string | null;
+      if (!slug || !scrapedAt) continue;
+      const ms = Date.parse(scrapedAt);
+      if (Number.isFinite(ms)) out.set(slug, ms);
+    }
+    if (data.length < pageSize) break;
+  }
+  return out;
+}
+
+async function computeIncrementalScrapePlan(options?: { includeUpdates?: boolean; thresholdMs?: number }) {
+  const includeUpdates = options?.includeUpdates !== false;
+  const thresholdMs = options?.thresholdMs ?? 60_000; // ignore tiny timestamp drift
+
+  const sitemap = await fetchSitemapEntries();
+  const scrapeIndex = await fetchAllTemplateScrapeIndex();
+
+  const urlsToScrape: string[] = [];
+  let missingCount = 0;
+  let updatedCount = 0;
+
+  const samples: Array<{ url: string; slug: string; reason: 'missing' | 'updated'; lastmod: string | null }> = [];
+
+  for (const entry of sitemap) {
+    const scrapedAtMs = scrapeIndex.get(entry.slug) ?? null;
+    if (!scrapedAtMs) {
+      urlsToScrape.push(entry.url);
+      missingCount++;
+      if (samples.length < 200) samples.push({ url: entry.url, slug: entry.slug, reason: 'missing', lastmod: entry.lastmod });
+      continue;
+    }
+    if (!includeUpdates) continue;
+
+    if (entry.lastmodMs && entry.lastmodMs - scrapedAtMs > thresholdMs) {
+      urlsToScrape.push(entry.url);
+      updatedCount++;
+      if (samples.length < 200) samples.push({ url: entry.url, slug: entry.slug, reason: 'updated', lastmod: entry.lastmod });
+    }
+  }
+
+  return {
+    totalInSitemap: sitemap.length,
+    existingInDb: scrapeIndex.size,
+    missingCount,
+    updatedCount,
+    toScrapeCount: urlsToScrape.length,
+    urlsToScrape,
+    samples,
+  };
 }
 
 // Helper to delete all template data and files
@@ -276,22 +368,11 @@ export async function POST(request: NextRequest) {
 
     switch (action) {
       case 'start': {
-        // Check for existing active scrape
+        // Backward compatible: "start" now runs an incremental update scrape (no destructive deletes).
         const existing = await getActiveFreshScrape();
         if (existing) {
-          return NextResponse.json(
-            { error: 'A fresh scrape is already in progress', state: existing },
-            { status: 400 }
-          );
+          return NextResponse.json({ error: 'A scrape is already in progress', state: existing }, { status: 400 });
         }
-
-        // Get featured authors
-        const { data: featuredAuthors } = await supabase
-          .from('featured_authors')
-          .select('author_id')
-          .eq('is_active', true);
-
-        const featuredAuthorIds = (featuredAuthors || []).map(a => a.author_id);
 
         // Create initial config (sanitized/clamped)
         const baseConfig: FreshScrapeConfig = {
@@ -316,13 +397,20 @@ export async function POST(request: NextRequest) {
           ...(config ? (clampFreshScraperConfig(config) as Partial<FreshScrapeConfig>) : {})
         };
 
+        const plan = await computeIncrementalScrapePlan({ includeUpdates: true });
+        if (plan.urlsToScrape.length === 0) {
+          return NextResponse.json({ error: 'No missing/updated templates to scrape' }, { status: 400 });
+        }
+
         // Create fresh scrape state
         const { data: state, error: insertError } = await supabase
           .from('fresh_scrape_state')
           .insert({
-            status: 'deleting',
-            phase: 'deletion',
-            featured_author_ids: JSON.stringify(featuredAuthorIds),
+            status: 'scraping_regular',
+            phase: 'regular_scrape',
+            total_sitemap_count: plan.totalInSitemap,
+            regular_template_urls: JSON.stringify(plan.urlsToScrape),
+            regular_total: plan.urlsToScrape.length,
             config: JSON.stringify(defaultConfig),
             started_at: new Date().toISOString()
           })
@@ -332,82 +420,24 @@ export async function POST(request: NextRequest) {
         if (insertError) throw insertError;
 
         return NextResponse.json({
-          message: 'Fresh scrape started',
+          message: 'Incremental scrape started',
           state,
-          featuredAuthorCount: featuredAuthorIds.length
+          discovery: plan
         });
       }
 
       case 'confirm_delete': {
-        // Get the active scrape in deletion phase
-        const state = await getActiveFreshScrape();
-        if (!state || state.phase !== 'deletion') {
-          return NextResponse.json(
-            { error: 'No active deletion pending' },
-            { status: 400 }
-          );
-        }
-
-        // Perform deletion
-        const deletionResult = await deleteAllData();
-
-        // Update state to discovery phase
-        await supabase
-          .from('fresh_scrape_state')
-          .update({
-            phase: 'discovery',
-            deletion_completed_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', state.id);
-
-        return NextResponse.json({
-          message: 'Deletion complete, starting discovery',
-          deletionResult,
-          stateId: state.id
-        });
+        return NextResponse.json(
+          { error: 'Full delete has been disabled. Use incremental update scraping instead.' },
+          { status: 400 }
+        );
       }
 
       case 'discover': {
-        // Get the active scrape in discovery phase
-        const state = await getActiveFreshScrape();
-        if (!state) {
-          return NextResponse.json(
-            { error: 'No active fresh scrape' },
-            { status: 400 }
-          );
-        }
-
-        // Fetch sitemap
-        const allUrls = await fetchSitemapUrls();
-
-        // Get featured author IDs
-        const featuredAuthorIds: string[] = safeJsonParse(state.featured_author_ids, []);
-
-        // We need to categorize URLs - but we don't know which templates belong to featured authors
-        // until we scrape them. So we'll just set all URLs and handle prioritization during scraping.
-        // The scraper will identify featured author templates as it processes them.
-
-        const { data: updatedState } = await supabase
-          .from('fresh_scrape_state')
-          .update({
-            total_sitemap_count: allUrls.length,
-            regular_template_urls: JSON.stringify(allUrls),
-            regular_total: allUrls.length,
-            phase: 'featured_scrape',
-            status: 'scraping_featured',
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', state.id)
-          .select()
-          .single();
-
-        return NextResponse.json({
-          message: 'Discovery complete',
-          totalUrls: allUrls.length,
-          featuredAuthorCount: featuredAuthorIds.length,
-          state: updatedState
-        });
+        return NextResponse.json(
+          { error: 'Discovery phase is no longer used. Use incremental update scraping instead.' },
+          { status: 400 }
+        );
       }
 
       case 'check_new': {
@@ -419,33 +449,24 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        const sitemapUrls = await fetchSitemapUrls();
+        const plan = await computeIncrementalScrapePlan({ includeUpdates: true });
 
-        const { data: existingSlugs } = await supabase
-          .from('templates')
-          .select('slug');
-        const existingSlugSet = new Set((existingSlugs || []).map(r => r.slug));
-
-        const missingTemplates = sitemapUrls
-          .map(url => {
-            const slug = url.split('/').filter(Boolean).pop() || '';
-            return { url, slug };
-          })
-          .filter(t => t.slug && !existingSlugSet.has(t.slug))
-          .map(t => {
-            const displayName = t.slug
-              .split('-')
-              .map(part => part ? (part[0].toUpperCase() + part.slice(1)) : part)
-              .join(' ');
-            return { ...t, displayName };
-          });
+        const templates = plan.samples.map((t) => {
+          const displayName = t.slug
+            .split('-')
+            .map(part => (part ? (part[0].toUpperCase() + part.slice(1)) : part))
+            .join(' ');
+          return { ...t, displayName };
+        });
 
         return NextResponse.json({
           discovery: {
-            totalInSitemap: sitemapUrls.length,
-            existingInDb: existingSlugSet.size,
-            missingCount: missingTemplates.length,
-            missingTemplates: missingTemplates.slice(0, 200)
+            totalInSitemap: plan.totalInSitemap,
+            existingInDb: plan.existingInDb,
+            missingCount: plan.missingCount,
+            updatedCount: plan.updatedCount,
+            toScrapeCount: plan.toScrapeCount,
+            templates
           }
         });
       }
@@ -459,25 +480,18 @@ export async function POST(request: NextRequest) {
           );
         }
 
+        const includeUpdates = body.includeUpdates !== false;
         let urlsToScrape: string[] = [];
         if (urls && Array.isArray(urls) && urls.length > 0) {
           urlsToScrape = urls;
         } else {
-          // Default behavior: compute missing templates from sitemap vs DB.
-          const sitemapUrls = await fetchSitemapUrls();
-          const { data: existingSlugs } = await supabase
-            .from('templates')
-            .select('slug');
-          const existingSlugSet = new Set((existingSlugs || []).map(r => r.slug));
-          urlsToScrape = sitemapUrls.filter(url => {
-            const slug = url.split('/').filter(Boolean).pop() || '';
-            return slug && !existingSlugSet.has(slug);
-          });
+          const plan = await computeIncrementalScrapePlan({ includeUpdates });
+          urlsToScrape = plan.urlsToScrape;
         }
 
         if (urlsToScrape.length === 0) {
           return NextResponse.json(
-            { error: 'No missing templates to scrape' },
+            { error: 'No missing/updated templates to scrape' },
             { status: 400 }
           );
         }
@@ -504,7 +518,9 @@ export async function POST(request: NextRequest) {
           ...(config ? (clampFreshScraperConfig(config) as Partial<FreshScrapeConfig>) : {})
         };
 
-        const sitemapCount = typeof body.totalSitemapCount === 'number' ? body.totalSitemapCount : 0;
+        const sitemapCount = typeof body.totalSitemapCount === 'number'
+          ? body.totalSitemapCount
+          : (await fetchSitemapEntries()).length;
 
         const { data: state, error: insertError } = await supabase
           .from('fresh_scrape_state')

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   supabase,
+  supabaseAdmin,
   checkConnection,
   getConnectionStatus,
   getStats,
@@ -23,6 +24,7 @@ export async function GET(request: NextRequest) {
 
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
+  const db = supabaseAdmin;
 
   try {
     switch (action) {
@@ -46,12 +48,12 @@ export async function GET(request: NextRequest) {
           authorCount,
           activityCount,
         ] = await Promise.all([
-          supabase.from('templates').select('*', { count: 'exact', head: true }),
-          supabase.from('subcategories').select('*', { count: 'exact', head: true }),
-          supabase.from('styles').select('*', { count: 'exact', head: true }),
-          supabase.from('features').select('*', { count: 'exact', head: true }),
-          supabase.from('featured_authors').select('*', { count: 'exact', head: true }).eq('is_active', true),
-          supabase.from('supabase_activity_log').select('*', { count: 'exact', head: true }),
+          db.from('templates').select('*', { count: 'exact', head: true }),
+          db.from('subcategories').select('*', { count: 'exact', head: true }),
+          db.from('styles').select('*', { count: 'exact', head: true }),
+          db.from('features').select('*', { count: 'exact', head: true }),
+          db.from('featured_authors').select('*', { count: 'exact', head: true }).eq('is_active', true),
+          db.from('supabase_activity_log').select('*', { count: 'exact', head: true }),
         ]);
 
         return NextResponse.json({
@@ -89,7 +91,7 @@ export async function GET(request: NextRequest) {
           return NextResponse.json({ error: 'Query parameter required' }, { status: 400 });
         }
 
-        const { data: templates, count, error } = await supabase
+        const { data: templates, count, error } = await db
           .from('templates')
           .select('*', { count: 'exact' })
           .or(`name.ilike.%${query}%,slug.ilike.%${query}%,author_name.ilike.%${query}%`)
@@ -112,9 +114,28 @@ export async function GET(request: NextRequest) {
         const offset = parseInt(searchParams.get('offset') || '0', 10);
 
         const validTables = [
-          'templates', 'subcategories', 'styles', 'features',
-          'featured_authors', 'ultra_featured_templates', 'template_blacklist',
-          'screenshot_exclusions', 'scrape_jobs', 'supabase_activity_log',
+          'templates',
+          'subcategories',
+          'styles',
+          'features',
+          'featured_authors',
+          'ultra_featured_templates',
+          'template_subcategories',
+          'template_styles',
+          'template_features',
+          'template_blacklist',
+          'screenshot_exclusions',
+          'fresh_scrape_state',
+          'fresh_scrape_screenshots',
+          'thumbnail_jobs',
+          'scrape_jobs',
+          'scrape_sessions',
+          'scrape_batches',
+          'batch_templates',
+          'session_resume_points',
+          'visitors',
+          'purchases',
+          'supabase_activity_log',
         ];
 
         if (!table || !validTables.includes(table)) {
@@ -124,7 +145,7 @@ export async function GET(request: NextRequest) {
           }, { status: 400 });
         }
 
-        const { data, count, error } = await supabase
+        const { data, count, error } = await db
           .from(table)
           .select('*', { count: 'exact' })
           .range(offset, offset + limit - 1);
@@ -142,7 +163,7 @@ export async function GET(request: NextRequest) {
         // Get recently added/updated templates
         const limit = parseInt(searchParams.get('limit') || '20', 10);
 
-        const { data, error } = await supabase
+        const { data, error } = await db
           .from('templates')
           .select('id, name, slug, author_name, screenshot_thumbnail_path, created_at, updated_at')
           .order('created_at', { ascending: false })
@@ -173,6 +194,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const db = supabaseAdmin;
     const body = await request.json();
     const { action } = body;
 
@@ -186,7 +208,7 @@ export async function POST(request: NextRequest) {
         // Clear old activity logs (keep last 7 days)
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-        const { error } = await supabase
+        const { error } = await db
           .from('supabase_activity_log')
           .delete()
           .lt('created_at', sevenDaysAgo);
@@ -212,20 +234,20 @@ export async function POST(request: NextRequest) {
         const startTime = Date.now();
 
         // Delete in order (junction tables first, then main tables)
-        await supabase.from('fresh_scrape_screenshots').delete().neq('id', 0);
-        await supabase.from('fresh_scrape_state').delete().neq('id', 0);
-        await supabase.from('template_subcategories').delete().neq('template_id', 0);
-        await supabase.from('template_styles').delete().neq('template_id', 0);
-        await supabase.from('template_features').delete().neq('template_id', 0);
-        await supabase.from('ultra_featured_templates').delete().neq('id', 0);
-        await supabase.from('batch_templates').delete().neq('id', 0);
-        await supabase.from('scrape_batches').delete().neq('id', 0);
-        await supabase.from('session_resume_points').delete().neq('id', 0);
-        await supabase.from('scrape_sessions').delete().neq('id', 0);
-        await supabase.from('scrape_logs').delete().neq('id', 0);
-        await supabase.from('scrape_jobs').delete().neq('id', 0);
-        await supabase.from('thumbnail_jobs').delete().neq('id', 0);
-        await supabase.from('templates').delete().neq('id', 0);
+        await db.from('fresh_scrape_screenshots').delete().neq('id', 0);
+        await db.from('fresh_scrape_state').delete().neq('id', 0);
+        await db.from('template_subcategories').delete().neq('template_id', 0);
+        await db.from('template_styles').delete().neq('template_id', 0);
+        await db.from('template_features').delete().neq('template_id', 0);
+        await db.from('ultra_featured_templates').delete().neq('id', 0);
+        await db.from('batch_templates').delete().neq('id', 0);
+        await db.from('scrape_batches').delete().neq('id', 0);
+        await db.from('session_resume_points').delete().neq('id', 0);
+        await db.from('scrape_sessions').delete().neq('id', 0);
+        await db.from('scrape_logs').delete().neq('id', 0);
+        await db.from('scrape_jobs').delete().neq('id', 0);
+        await db.from('thumbnail_jobs').delete().neq('id', 0);
+        await db.from('templates').delete().neq('id', 0);
 
         const duration = Date.now() - startTime;
 

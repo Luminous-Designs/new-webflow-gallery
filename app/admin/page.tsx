@@ -13,7 +13,8 @@ import {
   VisitorsSection,
   PurchasesSection,
   StorageSection,
-  SyncSection
+  SyncSection,
+  SupabaseExplorerSection
 } from '@/components/admin';
 import type { AdminSection } from '@/components/admin';
 
@@ -40,6 +41,8 @@ function AdminDashboard() {
         return <PurchasesSection />;
       case 'storage':
         return <StorageSection />;
+      case 'supabase-explorer':
+        return <SupabaseExplorerSection />;
       case 'sync':
         return <SyncSection />;
       default:

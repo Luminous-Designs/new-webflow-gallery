@@ -21,12 +21,12 @@ export async function GET(request: NextRequest) {
     // Get all unique authors from templates for suggestions
     const { data: templates } = await supabase
       .from('templates')
-      .select('author_id, author_name, author_avatar')
-      .not('author_id', 'is', null);
+      .select('author_id, author_name, author_avatar');
 
     // Count templates per author
     const authorMap = new Map<string, { author_id: string; author_name: string; author_avatar: string | null; template_count: number }>();
-    (templates || []).forEach(t => {
+    const templateRows = (templates || []) as Array<{ author_id: string | null; author_name: string | null; author_avatar: string | null }>;
+    templateRows.forEach(t => {
       if (t.author_id) {
         const existing = authorMap.get(t.author_id);
         if (existing) {
@@ -75,14 +75,16 @@ export async function POST(request: NextRequest) {
     }
 
     // Add featured author
+    const payload = {
+      author_id,
+      author_name,
+      is_active: true,
+      featured_at: new Date().toISOString()
+    } as unknown as never;
+
     const { error } = await supabase
       .from('featured_authors')
-      .upsert({
-        author_id,
-        author_name,
-        is_active: true,
-        featured_at: new Date().toISOString()
-      }, { onConflict: 'author_id' });
+      .upsert(payload, { onConflict: 'author_id' });
 
     if (error) throw error;
 
@@ -113,9 +115,10 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Remove featured author
+    const updatePayload = { is_active: false } as unknown as never;
     const { error } = await supabase
       .from('featured_authors')
-      .update({ is_active: false })
+      .update(updatePayload)
       .eq('author_id', author_id);
 
     if (error) throw error;

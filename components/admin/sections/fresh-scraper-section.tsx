@@ -104,6 +104,15 @@ interface ExecutorProgress {
   total: number;
 }
 
+interface SupabaseWriteState {
+  queued: number;
+  inFlight: boolean;
+  successful: number;
+  failed: number;
+  lastError: string | null;
+  recent: Array<{ slug: string; status: string; error?: string }>;
+}
+
 interface Screenshot {
   id: number;
   name: string | null;
@@ -175,7 +184,9 @@ interface NewTemplateDiscoveryState {
   totalInSitemap: number;
   existingInDb: number;
   missingCount: number;
-  missingTemplates: Array<{ url: string; slug: string; displayName: string }>;
+  updatedCount: number;
+  toScrapeCount: number;
+  missingTemplates: Array<{ url: string; slug: string; displayName: string; reason?: 'missing' | 'updated'; lastmod?: string | null }>;
   error: string | null;
 }
 
@@ -244,105 +255,6 @@ function applyInFlightProgress(state: FreshScrapeState, inFlight: ExecutorProgre
     regular_successful: (state.regular_successful || 0) + (inFlight.successful || 0),
     regular_failed: (state.regular_failed || 0) + (inFlight.failed || 0)
   };
-}
-
-// Delete Confirmation Dialog
-function DeleteConfirmationDialog({
-  onConfirm,
-  onCancel,
-  isDeleting
-}: {
-  onConfirm: () => void;
-  onCancel: () => void;
-  isDeleting: boolean;
-}) {
-  const [confirmText, setConfirmText] = useState('');
-  const isConfirmed = confirmText.toLowerCase() === 'delete everything';
-
-  return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full mx-4 overflow-hidden">
-        <div className="p-6 bg-gradient-to-r from-red-500 to-red-600 text-white">
-          <div className="flex items-center gap-3">
-            <div className="p-3 bg-white/20 rounded-xl">
-              <AlertTriangle className="h-8 w-8" />
-            </div>
-            <div>
-              <h2 className="text-2xl font-bold">Delete Everything?</h2>
-              <p className="text-red-100">This action cannot be undone</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="p-6 space-y-4">
-          <div className="p-4 bg-red-50 border border-red-200 rounded-xl">
-            <h3 className="font-semibold text-red-800 mb-2">This will permanently delete:</h3>
-            <ul className="space-y-2 text-sm text-red-700">
-              <li className="flex items-center gap-2">
-                <Database className="h-4 w-4" />
-                All templates from the database
-              </li>
-              <li className="flex items-center gap-2">
-                <ImageIcon className="h-4 w-4" />
-                All screenshots and thumbnails
-              </li>
-              <li className="flex items-center gap-2">
-                <Layers className="h-4 w-4" />
-                All categories, styles, and features
-              </li>
-              <li className="flex items-center gap-2">
-                <Star className="h-4 w-4" />
-                Ultra featured template settings
-              </li>
-            </ul>
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-gray-700">
-              Type <span className="font-mono bg-gray-100 px-2 py-1 rounded">&quot;delete everything&quot;</span> to confirm:
-            </label>
-            <input
-              type="text"
-              value={confirmText}
-              onChange={(e) => setConfirmText(e.target.value)}
-              placeholder="Type here to confirm..."
-              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none"
-              autoFocus
-            />
-          </div>
-        </div>
-
-        <div className="p-6 bg-gray-50 flex gap-3">
-          <Button
-            variant="outline"
-            onClick={onCancel}
-            disabled={isDeleting}
-            className="flex-1 h-12"
-          >
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={onConfirm}
-            disabled={!isConfirmed || isDeleting}
-            className="flex-1 h-12 bg-red-600 hover:bg-red-700"
-          >
-            {isDeleting ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin mr-2" />
-                Deleting...
-              </>
-            ) : (
-              <>
-                <Trash2 className="h-5 w-5 mr-2" />
-                Delete & Re-scrape
-              </>
-            )}
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 // Performance Controls Component
@@ -1387,8 +1299,6 @@ export function FreshScraperSection() {
   const { resolveAuthToken, loadStats } = useAdmin();
 
   // State
-  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
-  const [isDeleting, setIsDeleting] = useState(false);
   const [scrapeState, setScrapeState] = useState<FreshScrapeState | null>(null);
   const [pausedState, setPausedState] = useState<FreshScrapeState | null>(null);
   const [pausedLastScreenshot, setPausedLastScreenshot] = useState<LastScreenshotInfo | null>(null);
@@ -1421,11 +1331,14 @@ export function FreshScraperSection() {
   const [realTimeState, setRealTimeState] = useState<RealTimeState | null>(null);
   const [executorIsRunning, setExecutorIsRunning] = useState(false);
   const [executorProgress, setExecutorProgress] = useState<ExecutorProgress | null>(null);
+  const [supabaseWriteState, setSupabaseWriteState] = useState<SupabaseWriteState | null>(null);
   const [newTemplateDiscovery, setNewTemplateDiscovery] = useState<NewTemplateDiscoveryState>({
     phase: 'idle',
     totalInSitemap: 0,
     existingInDb: 0,
     missingCount: 0,
+    updatedCount: 0,
+    toScrapeCount: 0,
     missingTemplates: [],
     error: null
   });
@@ -1602,6 +1515,7 @@ export function FreshScraperSection() {
 	          setExecutorProgress(nextExecutorProgress);
 	          setCurrentBatch(events.currentBatch || []);
 	          setLogs(events.logs || []);
+	          setSupabaseWriteState((events.supabase || null) as SupabaseWriteState | null);
 	          if (events.realTimeState) {
 	            setRealTimeState(events.realTimeState);
 	          }
@@ -1659,17 +1573,14 @@ export function FreshScraperSection() {
     };
   }, [scrapeStateId, scrapeStateStatus, resolveAuthToken, loadScreenshotsPage]);
 
-  // Start fresh scrape
-  const startFreshScrape = async () => {
-    setShowDeleteDialog(true);
-  };
-
   const checkForNewTemplates = async () => {
     setNewTemplateDiscovery({
       phase: 'checking',
       totalInSitemap: 0,
       existingInDb: 0,
       missingCount: 0,
+      updatedCount: 0,
+      toScrapeCount: 0,
       missingTemplates: [],
       error: null
     });
@@ -1691,20 +1602,23 @@ export function FreshScraperSection() {
 
       const data = await response.json();
       const discovery = data.discovery;
+      const templates = (discovery?.templates || discovery?.missingTemplates || []) as Array<{ url: string; slug: string; displayName: string; reason?: 'missing' | 'updated'; lastmod?: string | null }>;
 
       setNewTemplateDiscovery({
         phase: 'checked',
         totalInSitemap: discovery.totalInSitemap || 0,
         existingInDb: discovery.existingInDb || 0,
         missingCount: discovery.missingCount || 0,
-        missingTemplates: discovery.missingTemplates || [],
+        updatedCount: discovery.updatedCount || 0,
+        toScrapeCount: discovery.toScrapeCount || 0,
+        missingTemplates: templates || [],
         error: null
       });
 
-      if ((discovery.missingCount || 0) > 0) {
-        toast.success(`Found ${discovery.missingCount} missing template${discovery.missingCount === 1 ? '' : 's'}`);
+      if ((discovery.toScrapeCount || 0) > 0) {
+        toast.success(`Found ${discovery.toScrapeCount} template${discovery.toScrapeCount === 1 ? '' : 's'} to scrape`);
       } else {
-        toast.info('No new templates found');
+        toast.info('No missing/updated templates found');
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to check for new templates';
@@ -1714,8 +1628,8 @@ export function FreshScraperSection() {
   };
 
   const startMissingTemplateScrape = async () => {
-    if (newTemplateDiscovery.missingCount === 0) return;
-    if (!confirm(`Scrape ${newTemplateDiscovery.missingCount} missing template${newTemplateDiscovery.missingCount === 1 ? '' : 's'} now?`)) {
+    if (newTemplateDiscovery.toScrapeCount === 0) return;
+    if (!confirm(`Scrape ${newTemplateDiscovery.toScrapeCount} template${newTemplateDiscovery.toScrapeCount === 1 ? '' : 's'} now? (missing: ${newTemplateDiscovery.missingCount}, updated: ${newTemplateDiscovery.updatedCount})`)) {
       return;
     }
 
@@ -1729,6 +1643,7 @@ export function FreshScraperSection() {
         body: JSON.stringify({
           action: 'start_update',
           totalSitemapCount: newTemplateDiscovery.totalInSitemap,
+          includeUpdates: true,
           config
         })
       });
@@ -1749,86 +1664,18 @@ export function FreshScraperSection() {
     }
   };
 
-  // Confirm delete and start
-  const confirmDeleteAndStart = async () => {
-    setIsDeleting(true);
-
-    try {
-      // Step 1: Start fresh scrape (creates state in 'deleting' phase)
-      const startResponse = await fetch('/api/admin/fresh-scrape', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${resolveAuthToken()}`
-        },
-        body: JSON.stringify({ action: 'start', config })
-      });
-
-      if (!startResponse.ok) {
-        throw new Error('Failed to start fresh scrape');
-      }
-
-      const startData = await startResponse.json();
-      setScrapeState(startData.state);
-      setShowDeleteDialog(false);
-
-      toast.success('Fresh scrape initiated');
-
-      // Step 2: Confirm delete
-      const deleteResponse = await fetch('/api/admin/fresh-scrape', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${resolveAuthToken()}`
-        },
-        body: JSON.stringify({ action: 'confirm_delete' })
-      });
-
-      if (!deleteResponse.ok) {
-        throw new Error('Deletion failed');
-      }
-
-      const deleteData = await deleteResponse.json();
-      toast.success(`Deleted ${deleteData.deletionResult.templatesDeleted} templates, ${deleteData.deletionResult.screenshotsDeleted} screenshots`);
-
-      // Step 3: Discover templates
-      const discoverResponse = await fetch('/api/admin/fresh-scrape', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${resolveAuthToken()}`
-        },
-        body: JSON.stringify({ action: 'discover' })
-      });
-
-      if (!discoverResponse.ok) {
-        throw new Error('Discovery failed');
-      }
-
-      const discoverData = await discoverResponse.json();
-      setScrapeState(discoverData.state);
-      toast.success(`Discovered ${discoverData.totalUrls} templates`);
-      toast.info('Ready to scrape', {
-        description: 'Adjust settings if needed, then click "Begin scrape" to start.'
-      });
-
-    } catch (error) {
-      console.error('Fresh scrape failed:', error);
-      toast.error(error instanceof Error ? error.message : 'Failed to start fresh scrape');
-    } finally {
-      setIsDeleting(false);
-    }
-  };
-
   // Execute batches
 	  const executeBatches = async (state: FreshScrapeState) => {
 	    setIsExecuting(true);
 
 	    try {
 	      let urls: string[] = [];
-	      if (state.regular_template_urls) {
+	      const rawUrls: unknown = (state as unknown as { regular_template_urls?: unknown }).regular_template_urls;
+	      if (Array.isArray(rawUrls)) {
+	        urls = rawUrls.filter((u): u is string => typeof u === 'string');
+	      } else if (typeof rawUrls === 'string' && rawUrls) {
 	        try {
-	          urls = JSON.parse(state.regular_template_urls) as string[];
+	          urls = JSON.parse(rawUrls) as string[];
 	        } catch {
 	          urls = [];
 	        }
@@ -2425,51 +2272,49 @@ export function FreshScraperSection() {
         </Card>
       )}
 
-      {/* Main Card */}
-      <Card className="p-8 border-2 border-dashed border-purple-200 bg-gradient-to-br from-purple-50/50 via-white to-pink-50/50">
-        <div className="text-center max-w-2xl mx-auto">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-purple-500 to-pink-500 shadow-xl mb-6">
-            <RotateCcw className="h-10 w-10 text-white" />
+      {/* Incremental Scrape Card */}
+      <Card className="p-8 border border-slate-200 bg-white">
+        <div className="max-w-3xl mx-auto">
+          <div className="flex items-start gap-4">
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-500 to-pink-500 shadow-lg shrink-0">
+              <RotateCcw className="h-7 w-7 text-white" />
+            </div>
+            <div className="flex-1">
+              <h1 className="text-2xl font-bold text-gray-900">Incremental Update Scrape</h1>
+              <p className="text-sm text-gray-600 mt-1">
+                No destructive deletes. This checks the Webflow sitemap for missing/updated templates and pushes updates into Supabase in batches.
+                Screenshots/thumbnails are saved locally and can be synced to the VPS via rsync.
+              </p>
+              <div className="mt-4 flex flex-col sm:flex-row gap-2">
+                <Button variant="outline" onClick={checkForNewTemplates} disabled={newTemplateDiscovery.phase === 'checking'}>
+                  {newTemplateDiscovery.phase === 'checking' ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Checking…
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                      Check sitemap
+                    </>
+                  )}
+                </Button>
+                <Button
+                  onClick={startMissingTemplateScrape}
+                  disabled={isExecuting || newTemplateDiscovery.toScrapeCount === 0}
+                  className="bg-blue-600 hover:bg-blue-700"
+                >
+                  <Play className="h-4 w-4 mr-2" />
+                  Scrape missing/updated templates
+                </Button>
+              </div>
+              {newTemplateDiscovery.phase === 'checked' && (
+                <div className="mt-3 text-xs text-gray-500">
+                  Missing: {newTemplateDiscovery.missingCount} · Updated: {newTemplateDiscovery.updatedCount} · To scrape: {newTemplateDiscovery.toScrapeCount}
+                </div>
+              )}
+            </div>
           </div>
-
-          <h1 className="text-3xl font-bold text-gray-800 mb-3">
-            Start from Fresh
-          </h1>
-          <p className="text-gray-500 mb-8 max-w-lg mx-auto">
-            Delete all existing templates and re-scrape the entire Webflow catalog.
-            Perfect for updating thumbnails, refreshing data, or starting clean.
-          </p>
-
-          <div className="grid grid-cols-3 gap-4 mb-8">
-            <div className="p-4 bg-white rounded-xl border shadow-sm">
-              <Trash2 className="h-6 w-6 text-red-500 mx-auto mb-2" />
-              <div className="text-sm font-medium text-gray-700">Delete All</div>
-              <div className="text-xs text-gray-400">Templates & images</div>
-            </div>
-            <div className="p-4 bg-white rounded-xl border shadow-sm">
-              <Globe className="h-6 w-6 text-blue-500 mx-auto mb-2" />
-              <div className="text-sm font-medium text-gray-700">Discover</div>
-              <div className="text-xs text-gray-400">From Webflow sitemap</div>
-            </div>
-            <div className="p-4 bg-white rounded-xl border shadow-sm">
-              <Download className="h-6 w-6 text-green-500 mx-auto mb-2" />
-              <div className="text-sm font-medium text-gray-700">Re-scrape</div>
-              <div className="text-xs text-gray-400">With fresh screenshots</div>
-            </div>
-          </div>
-
-          <Button
-            size="lg"
-            onClick={startFreshScrape}
-            className="h-14 px-8 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 shadow-lg"
-          >
-            <Trash2 className="h-5 w-5 mr-2" />
-            Delete All Templates & Re-scrape
-          </Button>
-
-          <p className="text-xs text-gray-400 mt-4">
-            Featured author templates will be scraped first
-          </p>
         </div>
       </Card>
 
@@ -2500,16 +2345,85 @@ export function FreshScraperSection() {
         </Card>
       </div>
 
-      {/* Check for New Templates */}
+      {/* Supabase Push Visibility */}
+      <Card className="p-6 border border-slate-200 bg-white">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+              <Database className="h-5 w-5 text-emerald-700" />
+              Supabase Push
+            </h3>
+            <p className="text-sm text-gray-500">
+              Shows live write queue + recent templates persisted to Supabase during scraping.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 justify-end">
+            <Badge variant="outline" className="bg-slate-50">
+              Queued: {supabaseWriteState?.queued ?? 0}
+            </Badge>
+            <Badge variant="outline" className="bg-slate-50">
+              In flight: {supabaseWriteState?.inFlight ? 'yes' : 'no'}
+            </Badge>
+            <Badge variant="outline" className="bg-green-50 border-green-200 text-green-700">
+              Saved: {supabaseWriteState?.successful ?? 0}
+            </Badge>
+            <Badge variant="outline" className="bg-red-50 border-red-200 text-red-700">
+              Failed: {supabaseWriteState?.failed ?? 0}
+            </Badge>
+          </div>
+        </div>
+
+        {supabaseWriteState?.lastError && (
+          <div className="mt-3 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+            Last error: {supabaseWriteState.lastError}
+          </div>
+        )}
+
+        <div className="mt-4 border rounded-lg overflow-hidden">
+          <ScrollArea className="h-[220px]">
+            <div className="divide-y">
+              {(supabaseWriteState?.recent || []).slice(0, 50).map((item, idx) => (
+                <div key={`${item.slug}-${idx}`} className="px-3 py-2 flex items-center justify-between text-sm">
+                  <div className="font-mono text-xs text-gray-700 truncate max-w-[65%]">{item.slug}</div>
+                  <div className="flex items-center gap-2">
+                    <Badge
+                      variant="secondary"
+                      className={
+                        item.status === 'saved'
+                          ? 'bg-green-100 text-green-700'
+                          : item.status === 'failed'
+                            ? 'bg-red-100 text-red-700'
+                            : 'bg-slate-100 text-slate-700'
+                      }
+                    >
+                      {item.status}
+                    </Badge>
+                    {item.error && (
+                      <span className="text-xs text-red-600 truncate max-w-[220px]" title={item.error}>
+                        {item.error}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {(!supabaseWriteState || (supabaseWriteState.recent || []).length === 0) && (
+                <div className="p-6 text-center text-sm text-gray-500">No Supabase writes yet.</div>
+              )}
+            </div>
+          </ScrollArea>
+        </div>
+      </Card>
+
+      {/* Check for Updates */}
       <Card className="p-6 border border-slate-200 bg-white">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
             <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
               <Globe className="h-5 w-5 text-blue-600" />
-              Check for New Templates
+              Check for Missing/Updated Templates
             </h3>
             <p className="text-sm text-gray-500">
-              Scan the Webflow sitemap and find templates missing from your gallery.
+              Scan the Webflow sitemap and find templates that are missing or have changed since the last scrape.
             </p>
           </div>
           <Button
@@ -2533,7 +2447,7 @@ export function FreshScraperSection() {
 
         {newTemplateDiscovery.phase === 'checked' && (
           <div className="mt-4 space-y-4">
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-4 gap-3">
               <div className="p-3 rounded-lg bg-slate-50 border">
                 <div className="text-xs text-gray-500">In sitemap</div>
                 <div className="text-xl font-bold text-gray-800">{newTemplateDiscovery.totalInSitemap}</div>
@@ -2542,18 +2456,24 @@ export function FreshScraperSection() {
                 <div className="text-xs text-gray-500">In gallery</div>
                 <div className="text-xl font-bold text-gray-800">{newTemplateDiscovery.existingInDb}</div>
               </div>
-              <div className={`p-3 rounded-lg border ${newTemplateDiscovery.missingCount > 0 ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'}`}>
+              <div className={`p-3 rounded-lg border ${newTemplateDiscovery.missingCount > 0 ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
                 <div className="text-xs text-gray-500">Missing</div>
-                <div className={`text-xl font-bold ${newTemplateDiscovery.missingCount > 0 ? 'text-amber-700' : 'text-green-700'}`}>
+                <div className={`text-xl font-bold ${newTemplateDiscovery.missingCount > 0 ? 'text-amber-700' : 'text-gray-800'}`}>
                   {newTemplateDiscovery.missingCount}
+                </div>
+              </div>
+              <div className={`p-3 rounded-lg border ${newTemplateDiscovery.updatedCount > 0 ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200'}`}>
+                <div className="text-xs text-gray-500">Updated</div>
+                <div className={`text-xl font-bold ${newTemplateDiscovery.updatedCount > 0 ? 'text-blue-700' : 'text-gray-800'}`}>
+                  {newTemplateDiscovery.updatedCount}
                 </div>
               </div>
             </div>
 
-            {newTemplateDiscovery.missingCount > 0 && (
+            {newTemplateDiscovery.toScrapeCount > 0 && (
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div className="text-sm text-gray-600">
-                  Showing {Math.min(10, newTemplateDiscovery.missingTemplates.length)} of {newTemplateDiscovery.missingCount} missing templates
+                  Showing {Math.min(10, newTemplateDiscovery.missingTemplates.length)} of {newTemplateDiscovery.toScrapeCount} templates to scrape
                 </div>
                 <Button
                   onClick={startMissingTemplateScrape}
@@ -2561,7 +2481,7 @@ export function FreshScraperSection() {
                   className="bg-blue-600 hover:bg-blue-700"
                 >
                   <Play className="h-4 w-4 mr-2" />
-                  Scrape missing templates
+                  Scrape missing/updated templates
                 </Button>
               </div>
             )}
@@ -2592,14 +2512,6 @@ export function FreshScraperSection() {
         )}
       </Card>
 
-      {/* Delete Dialog */}
-      {showDeleteDialog && (
-        <DeleteConfirmationDialog
-          onConfirm={confirmDeleteAndStart}
-          onCancel={() => setShowDeleteDialog(false)}
-          isDeleting={isDeleting}
-        />
-      )}
     </div>
   );
 }

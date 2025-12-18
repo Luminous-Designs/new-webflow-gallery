@@ -4,9 +4,10 @@ import sharp from 'sharp';
 import os from 'os';
 import path from 'path';
 import { promises as fs } from 'fs';
-import { db, runAlternateHomepageMigration } from '@/lib/db';
+import { supabaseAdmin } from '@/lib/supabase';
 import { preparePageForScreenshot } from '@/lib/screenshot/prepare';
 import { detectHomepage } from './homepage-detector';
+import { SupabaseTemplateBatchWriter, type SupabaseWriteSnapshot } from './supabase-template-writer';
 
 // Configure Sharp globally for memory efficiency.
 // Concurrency is set dynamically per scraper instance to match CPU/core capacity.
@@ -194,6 +195,7 @@ export interface FreshScraperEvents {
   'phase-change': (data: { phase: string; message: string }) => void;
   'progress': (data: { processed: number; successful: number; failed: number; total: number }) => void;
   'screenshot-captured': (data: { name: string; slug: string; thumbnailPath: string; isFeaturedAuthor: boolean }) => void;
+  'supabase-state': (data: SupabaseWriteSnapshot) => void;
   'error': (data: { message: string; url?: string }) => void;
   'complete': () => void;
   'paused': () => void;
@@ -314,6 +316,7 @@ export class FreshScraper extends EventEmitter {
   private pendingBrowserRecreation: boolean = false;
   private semaphore: Semaphore;
   private imageSemaphore: Semaphore;
+  private supabaseWriter: SupabaseTemplateBatchWriter;
 
   // Cached screenshot exclusions to avoid per-template DB queries
   private screenshotExclusionSelectors: string[] = [];
@@ -332,10 +335,6 @@ export class FreshScraper extends EventEmitter {
   // Event-based pause/resume (replaces polling loops)
   private resumePromise: Promise<void> | null = null;
   private resumeResolve: (() => void) | null = null;
-
-  // State persistence debouncing
-  private stateSaveTimeout: NodeJS.Timeout | null = null;
-  private stateSaveDebounceMs: number = 5000; // Only save every 5 seconds max
 
   // Event-based page availability (replaces polling for pages)
   private pageWaiters: (() => void)[] = [];
@@ -366,6 +365,11 @@ export class FreshScraper extends EventEmitter {
     };
     this.semaphore = new Semaphore(this.config.concurrency);
     this.imageSemaphore = new Semaphore(this.getDesiredImageConcurrency());
+    this.supabaseWriter = new SupabaseTemplateBatchWriter({
+      batchSize: Math.max(5, Math.min(50, this.config.batchSize || 25)),
+      flushIntervalMs: 750,
+      maxRecent: 250,
+    });
     this.updateSharpConcurrency();
     this.scrapeState = this.getDefaultState();
   }
@@ -394,165 +398,33 @@ export class FreshScraper extends EventEmitter {
     await fs.mkdir(screenshotDir, { recursive: true });
     await fs.mkdir(thumbnailDir, { recursive: true });
 
-    // Run database migration for alternate homepage columns
-    await runAlternateHomepageMigration();
-
-    // Run migration for scrape state table
-    await this.runScrapeStateMigration();
-
-    // Load featured author IDs
-    const authors = await db.allAsync<{ author_id: string }>(
-      'SELECT author_id FROM featured_authors WHERE is_active = 1'
-    );
-    this.featuredAuthorIds = new Set(authors.map(a => a.author_id));
-
-    // Only restore state if explicitly requested (e.g., for resuming after app restart)
     if (restoreState) {
-      await this.loadStateFromDb();
-    } else {
-      // Start fresh - clear any old state
-      this.pausedUrls = new Set();
-      this.remainingUrls = new Set();
-      this.timeoutCount = 0;
-      this.consecutiveTimeouts = 0;
+      this.log('warn', 'restoreState requested, but FreshScraper no longer persists local state.');
     }
+
+    const { data: authors, error } = await supabaseAdmin
+      .from('featured_authors')
+      .select('author_id')
+      .eq('is_active', true);
+    if (error) {
+      this.log('warn', `Failed to load featured authors from Supabase: ${error.message}`);
+      this.featuredAuthorIds = new Set();
+    } else {
+      this.featuredAuthorIds = new Set((authors || []).map(a => a.author_id));
+    }
+
+    // Start fresh
+    this.pausedUrls = new Set();
+    this.remainingUrls = new Set();
+    this.timeoutCount = 0;
+    this.consecutiveTimeouts = 0;
 
     this.log('info', `Initialized with ${this.featuredAuthorIds.size} featured authors`);
-  }
-
-  private async runScrapeStateMigration(): Promise<void> {
-    try {
-      await db.runAsync(`
-        CREATE TABLE IF NOT EXISTS scrape_state (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          status TEXT NOT NULL DEFAULT 'idle',
-          total_urls INTEGER NOT NULL DEFAULT 0,
-          processed_urls INTEGER NOT NULL DEFAULT 0,
-          successful_urls INTEGER NOT NULL DEFAULT 0,
-          failed_urls INTEGER NOT NULL DEFAULT 0,
-          timeout_count INTEGER NOT NULL DEFAULT 0,
-          consecutive_timeouts INTEGER NOT NULL DEFAULT 0,
-          paused_urls TEXT NOT NULL DEFAULT '[]',
-          remaining_urls TEXT NOT NULL DEFAULT '[]',
-          started_at TEXT,
-          paused_at TEXT,
-          updated_at TEXT DEFAULT (datetime('now'))
-        )
-      `);
-
-      // Ensure a row exists
-      await db.runAsync(`
-        INSERT OR IGNORE INTO scrape_state (id) VALUES (1)
-      `);
-    } catch (error) {
-      this.log('warn', `Failed to create scrape_state table: ${error}`);
-    }
-  }
-
-  private async loadStateFromDb(): Promise<void> {
-    try {
-      const state = await db.getAsync<{
-        status: string;
-        total_urls: number;
-        processed_urls: number;
-        successful_urls: number;
-        failed_urls: number;
-        timeout_count: number;
-        consecutive_timeouts: number;
-        paused_urls: string;
-        remaining_urls: string;
-        started_at: string | null;
-        paused_at: string | null;
-      }>('SELECT * FROM scrape_state WHERE id = 1');
-
-      if (state && state.status !== 'idle' && state.status !== 'completed') {
-        this.scrapeState = {
-          status: state.status as ScrapeState['status'],
-          totalUrls: state.total_urls,
-          processedUrls: state.processed_urls,
-          successfulUrls: state.successful_urls,
-          failedUrls: state.failed_urls,
-          timeoutCount: state.timeout_count,
-          consecutiveTimeouts: state.consecutive_timeouts,
-          pausedUrls: JSON.parse(state.paused_urls || '[]'),
-          remainingUrls: JSON.parse(state.remaining_urls || '[]'),
-          startedAt: state.started_at,
-          pausedAt: state.paused_at,
-        };
-
-        this.pausedUrls = new Set(this.scrapeState.pausedUrls);
-        this.remainingUrls = new Set(this.scrapeState.remainingUrls);
-        this.timeoutCount = this.scrapeState.timeoutCount;
-        this.consecutiveTimeouts = this.scrapeState.consecutiveTimeouts;
-
-        if (state.status === 'paused' || state.status === 'timeout_paused') {
-          this.isPaused = state.status === 'paused';
-          this.isTimeoutPaused = state.status === 'timeout_paused';
-        }
-
-        this.log('info', `Restored scrape state: ${state.status}, ${this.remainingUrls.size} URLs remaining, ${this.pausedUrls.size} paused`);
-      }
-    } catch (error) {
-      this.log('warn', `Failed to load scrape state: ${error}`);
-    }
-  }
-
-  private async saveStateToDb(): Promise<void> {
-    try {
-      await db.runAsync(`
-        UPDATE scrape_state SET
-          status = ?,
-          total_urls = ?,
-          processed_urls = ?,
-          successful_urls = ?,
-          failed_urls = ?,
-          timeout_count = ?,
-          consecutive_timeouts = ?,
-          paused_urls = ?,
-          remaining_urls = ?,
-          started_at = ?,
-          paused_at = ?,
-          updated_at = datetime('now')
-        WHERE id = 1
-      `, [
-        this.scrapeState.status,
-        this.scrapeState.totalUrls,
-        this.scrapeState.processedUrls,
-        this.scrapeState.successfulUrls,
-        this.scrapeState.failedUrls,
-        this.scrapeState.timeoutCount,
-        this.scrapeState.consecutiveTimeouts,
-        JSON.stringify(this.scrapeState.pausedUrls),
-        JSON.stringify(this.scrapeState.remainingUrls),
-        this.scrapeState.startedAt,
-        this.scrapeState.pausedAt,
-      ]);
-    } catch (error) {
-      this.log('warn', `Failed to save scrape state: ${error}`);
-    }
   }
 
   private updateState(updates: Partial<ScrapeState>): void {
     this.scrapeState = { ...this.scrapeState, ...updates };
     this.emit('state-change', this.scrapeState);
-
-    // Debounced save to DB - only save every 5 seconds max to reduce CPU/IO
-    if (this.stateSaveTimeout) {
-      clearTimeout(this.stateSaveTimeout);
-    }
-    this.stateSaveTimeout = setTimeout(() => {
-      this.saveStateToDb().catch(() => {});
-      this.stateSaveTimeout = null;
-    }, this.stateSaveDebounceMs);
-  }
-
-  // Force immediate save (for critical state changes)
-  private async forceStateSave(): Promise<void> {
-    if (this.stateSaveTimeout) {
-      clearTimeout(this.stateSaveTimeout);
-      this.stateSaveTimeout = null;
-    }
-    await this.saveStateToDb();
   }
 
   // Event-based pause waiting (replaces polling loop)
@@ -605,10 +477,23 @@ export class FreshScraper extends EventEmitter {
       return this.screenshotExclusionSelectors;
     }
     try {
-      const exclusions = await db.allAsync<{ selector: string }>(
-        'SELECT selector FROM screenshot_exclusions WHERE is_active = 1'
-      );
-      this.screenshotExclusionSelectors = exclusions.map(e => e.selector);
+      const { data, error } = await supabaseAdmin
+        .from('screenshot_exclusions')
+        .select('selector, selector_type')
+        .eq('is_active', true);
+      if (error) {
+        throw error;
+      }
+      this.screenshotExclusionSelectors = (data || [])
+        .map((row) => {
+          const selector = (row.selector as string | null) || '';
+          const type = (row.selector_type as string | null) || 'selector';
+          if (!selector) return null;
+          if (type === 'class' && !selector.startsWith('.')) return `.${selector}`;
+          if (type === 'id' && !selector.startsWith('#')) return `#${selector}`;
+          return selector;
+        })
+        .filter((s): s is string => !!s);
       this.screenshotExclusionsFetchedAt = now;
     } catch (error) {
       this.log('warn', `Failed to fetch screenshot exclusions: ${error}`);
@@ -905,6 +790,10 @@ export class FreshScraper extends EventEmitter {
     return this.scrapeState;
   }
 
+  getSupabaseWriteState(): SupabaseWriteSnapshot {
+    return this.supabaseWriter.getSnapshot();
+  }
+
   getRealTimeState(): {
     activeBrowsers: number;
     totalPagesInUse: number;
@@ -1029,16 +918,6 @@ export class FreshScraper extends EventEmitter {
     this.emit('realtime-state', this.getRealTimeState());
     this.log('info', `Starting scrape of ${urlsToProcess.length} URLs (concurrency=${this.config.concurrency}, batchSize=${this.config.batchSize})`);
 
-    // Preload relation caches to minimize DB reads during scrape
-    const [existingSubcats, existingStyles, existingFeatures] = await Promise.all([
-      db.allAsync<{ id: number; name: string }>('SELECT id, name FROM subcategories'),
-      db.allAsync<{ id: number; name: string }>('SELECT id, name FROM styles'),
-      db.allAsync<{ id: number; name: string }>('SELECT id, name FROM features')
-    ]);
-    const subcategoryCache = new Map(existingSubcats.map(r => [r.name.toLowerCase(), r.id]));
-    const styleCache = new Map(existingStyles.map(r => [r.name.toLowerCase(), r.id]));
-    const featureCache = new Map(existingFeatures.map(r => [r.name.toLowerCase(), r.id]));
-
     let lastProgressEmit = 0;
     const progressEmitInterval = 5;
     let internalBatchIndex = 0;
@@ -1121,10 +1000,7 @@ export class FreshScraper extends EventEmitter {
             const saveResult = await this.processImagesAndSaveTemplate(
               browserResult,
               url,
-              index,
-              subcategoryCache,
-              styleCache,
-              featureCache
+              index
             );
 
             successful++;
@@ -1517,10 +1393,7 @@ export class FreshScraper extends EventEmitter {
   private async processImagesAndSaveTemplate(
     result: BrowserScrapeSuccess,
     storefrontUrl: string,
-    batchIndex: number,
-    subcategoryCache: Map<string, number>,
-    styleCache: Map<string, number>,
-    featureCache: Map<string, number>
+    batchIndex: number
   ): Promise<{ thumbnailPath?: string }> {
     const { slug, data } = result;
 
@@ -1571,121 +1444,40 @@ export class FreshScraper extends EventEmitter {
     this.updatePhase(batchIndex, 'saving');
 
     const templateId = `wf_${slug}`;
+    const now = new Date().toISOString();
+    this.emit('supabase-state', this.supabaseWriter.getSnapshot());
 
-    await db.transaction(async (tx) => {
-      await tx.runAsync(
-        `INSERT OR REPLACE INTO templates (
-          template_id, name, slug, author_name, author_id, author_avatar,
-          storefront_url, live_preview_url, designer_preview_url,
-          price, short_description, long_description,
-          screenshot_path, screenshot_thumbnail_path,
-          is_featured, is_cms, is_ecommerce,
-          screenshot_url, is_alternate_homepage, alternate_homepage_path,
-          scraped_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-        [
-          templateId,
-          data.name,
-          slug,
-          data.authorName,
-          data.authorId,
-          data.authorAvatar,
-          storefrontUrl,
-          data.livePreviewUrl,
-          data.designerPreviewUrl,
-          data.price,
-          data.shortDescription,
-          data.longDescription,
-          screenshotPath,
-          thumbnailPath,
-          result.isFeaturedAuthor ? 1 : 0,
-          data.isCms ? 1 : 0,
-          data.isEcommerce ? 1 : 0,
-          result.screenshotUrl,
-          result.isAlternateHomepage ? 1 : 0,
-          result.alternateHomepagePath
-        ]
-      );
-
-      const insertedTemplate = await tx.getAsync<{ id: number }>(
-        'SELECT id FROM templates WHERE template_id = ?',
-        [templateId]
-      );
-
-      if (!insertedTemplate) return;
-
-      const getOrCreateId = async (
-        table: 'subcategories' | 'styles' | 'features',
-        rawName: string
-      ): Promise<number | null> => {
-        const name = rawName.toLowerCase();
-        const slugVal = name.replace(/[^a-z0-9]+/g, '-');
-        let cache: Map<string, number>;
-        let insertSql: string;
-        let insertParams: string[];
-
-        if (table === 'subcategories') {
-          cache = subcategoryCache;
-          insertSql = `INSERT OR IGNORE INTO subcategories (name, slug, display_name) VALUES (?, ?, ?)`;
-          insertParams = [name, slugVal, rawName];
-        } else if (table === 'styles') {
-          cache = styleCache;
-          insertSql = `INSERT OR IGNORE INTO styles (name, slug, display_name) VALUES (?, ?, ?)`;
-          insertParams = [name, slugVal, rawName];
-        } else {
-          cache = featureCache;
-          let iconType = 'default';
-          if (name.includes('cms')) iconType = 'cms';
-          if (name.includes('ecommerce')) iconType = 'ecommerce';
-          insertSql = `INSERT OR IGNORE INTO features (name, slug, display_name, icon_type) VALUES (?, ?, ?, ?)`;
-          insertParams = [name, slugVal, rawName, iconType];
-        }
-
-        const cached = cache.get(name);
-        if (cached) return cached;
-
-        await tx.runAsync(insertSql, insertParams);
-        const row = await tx.getAsync<{ id: number }>(
-          `SELECT id FROM ${table} WHERE name = ?`,
-          [name]
-        );
-        if (row?.id) {
-          cache.set(name, row.id);
-          return row.id;
-        }
-        return null;
-      };
-
-      for (const sub of data.subcategories) {
-        const id = await getOrCreateId('subcategories', sub);
-        if (id) {
-          await tx.runAsync(
-            'INSERT OR IGNORE INTO template_subcategories (template_id, subcategory_id) VALUES (?, ?)',
-            [insertedTemplate.id, id]
-          );
-        }
-      }
-
-      for (const style of data.styles) {
-        const id = await getOrCreateId('styles', style);
-        if (id) {
-          await tx.runAsync(
-            'INSERT OR IGNORE INTO template_styles (template_id, style_id) VALUES (?, ?)',
-            [insertedTemplate.id, id]
-          );
-        }
-      }
-
-      for (const feature of data.features) {
-        const id = await getOrCreateId('features', feature);
-        if (id) {
-          await tx.runAsync(
-            'INSERT OR IGNORE INTO template_features (template_id, feature_id) VALUES (?, ?)',
-            [insertedTemplate.id, id]
-          );
-        }
-      }
+    await this.supabaseWriter.enqueue({
+      template: {
+        template_id: templateId,
+        name: data.name || slug,
+        slug,
+        author_name: data.authorName,
+        author_id: data.authorId,
+        author_avatar: data.authorAvatar,
+        storefront_url: storefrontUrl,
+        live_preview_url: data.livePreviewUrl,
+        designer_preview_url: data.designerPreviewUrl || null,
+        price: data.price || null,
+        short_description: data.shortDescription || null,
+        long_description: data.longDescription || null,
+        screenshot_path: screenshotPath,
+        screenshot_thumbnail_path: thumbnailPath,
+        is_featured: result.isFeaturedAuthor,
+        is_cms: data.isCms,
+        is_ecommerce: data.isEcommerce,
+        screenshot_url: result.screenshotUrl,
+        is_alternate_homepage: result.isAlternateHomepage,
+        alternate_homepage_path: result.alternateHomepagePath,
+        scraped_at: now,
+        updated_at: now,
+      },
+      subcategories: Array.isArray(data.subcategories) ? data.subcategories : [],
+      styles: Array.isArray(data.styles) ? data.styles : [],
+      features: Array.isArray(data.features) ? data.features : [],
     });
+
+    this.emit('supabase-state', this.supabaseWriter.getSnapshot());
 
     this.updatePhase(batchIndex, 'completed');
     this.log('info', `Completed: ${slug}`);
@@ -1740,7 +1532,7 @@ export class FreshScraper extends EventEmitter {
     this.isPaused = false;
     this.isTimeoutPaused = false;
     this.isStopped = false;
-    await this.saveStateToDb();
+    this.emit('state-change', this.scrapeState);
     this.log('info', 'Scrape state cleared');
   }
 }
