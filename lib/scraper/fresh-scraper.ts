@@ -1360,10 +1360,42 @@ export class FreshScraper extends EventEmitter {
       this.updatePhase(batchIndex, 'scraping_details');
 
       const data = await page.evaluate(() => {
-        const nameEl = document.querySelector('h4') || document.querySelector('h1');
-        const name = nameEl?.textContent?.trim()
-          .replace(' - Webflow Ecommerce Website Template', '')
-          .replace(' - Webflow HTML Website Template', '') || '';
+        const normalizeWhitespace = (value: string | null | undefined) =>
+          (value || '').replace(/\s+/g, ' ').trim();
+        const stripWebflowSuffix = (value: string) =>
+          value
+            .replace(/\s+[-–—]\s*Webflow.*$/i, '')
+            .replace(/\s+\|\s*Webflow.*$/i, '')
+            .trim();
+        const isPlaceholderName = (value: string) => {
+          const lower = value.toLowerCase();
+          return (
+            !value ||
+            lower === 'customize this template' ||
+            lower === 'preview in webflow' ||
+            lower === 'get this template'
+          );
+        };
+        const pickName = () => {
+          const candidates = [
+            document.querySelector('meta[property="og:title"]')?.getAttribute('content'),
+            document.querySelector('meta[name="twitter:title"]')?.getAttribute('content'),
+            document.querySelector('.product-hero_heading')?.textContent,
+            document.querySelector('.product-hero_title')?.textContent,
+            document.querySelector('.product-hero__title')?.textContent,
+            document.querySelector('.product-hero h1')?.textContent,
+            document.querySelector('h1')?.textContent,
+            document.title,
+          ];
+
+          for (const candidate of candidates) {
+            const cleaned = stripWebflowSuffix(normalizeWhitespace(candidate));
+            if (cleaned && !isPlaceholderName(cleaned)) return cleaned;
+          }
+          return '';
+        };
+
+        const name = pickName();
 
         const authorLinkEl = document.querySelector('a[href*="/designers/"]');
         let authorId: string | null = null;
