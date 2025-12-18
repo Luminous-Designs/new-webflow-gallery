@@ -19,6 +19,7 @@ import { toAssetUrl } from '@/lib/assets';
 interface TemplateCardProps {
   template: Template;
   onPreview: (template: Template) => void;
+  onAuthorClick: (authorId: string, authorName: string) => void;
 }
 
 function formatDate(dateString?: string): string {
@@ -31,7 +32,7 @@ function formatDate(dateString?: string): string {
   });
 }
 
-function TemplateCard({ template, onPreview }: TemplateCardProps) {
+function TemplateCard({ template, onPreview, onAuthorClick }: TemplateCardProps) {
   const [isHovered, setIsHovered] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const animationRef = useRef<NodeJS.Timeout | null>(null);
@@ -73,6 +74,13 @@ function TemplateCard({ template, onPreview }: TemplateCardProps) {
     };
   }, [isHovered]);
 
+  const handleAuthorClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (template.author_id && template.author_name) {
+      onAuthorClick(template.author_id, template.author_name);
+    }
+  };
+
   return (
     <motion.article
       initial={{ opacity: 0, y: 20 }}
@@ -101,16 +109,6 @@ function TemplateCard({ template, onPreview }: TemplateCardProps) {
           ) : (
             <div className="w-full h-full flex items-center justify-center">
               <span className="text-neutral-400 text-sm tracking-wide uppercase">No preview</span>
-            </div>
-          )}
-
-          {/* Featured Label - Positioned at top-left corner */}
-          {template.is_featured_author && (
-            <div className="absolute top-0 left-0 z-10">
-              <div className="bg-neutral-900 text-white px-3 py-1.5 text-[10px] font-medium tracking-[0.2em] uppercase flex items-center gap-1.5">
-                <Sparkles className="h-3 w-3" />
-                Featured
-              </div>
             </div>
           )}
 
@@ -145,22 +143,39 @@ function TemplateCard({ template, onPreview }: TemplateCardProps) {
         </div>
 
         {/* Card Content */}
-        <div className="p-5 space-y-4 border-t border-neutral-100">
-          {/* Template Name */}
-          <h3 className="font-semibold text-lg text-neutral-900 line-clamp-1 tracking-tight">
-            {template.name}
-          </h3>
-
-          {/* Author */}
-          <div className="flex items-center gap-2 text-neutral-600">
-            <User className="h-3.5 w-3.5" />
-            <span className="text-sm">{template.author_name || 'Unknown Author'}</span>
+        <div className="p-5 space-y-3 border-t border-neutral-100">
+          {/* Template Name and Featured Badge */}
+          <div className="flex items-start justify-between gap-2">
+            <h3 className="font-semibold text-lg text-neutral-900 line-clamp-1 tracking-tight">
+              {template.name}
+            </h3>
+            {template.is_featured_author && (
+              <span className="shrink-0 inline-flex items-center gap-1 bg-gradient-to-r from-amber-500 to-orange-500 text-white px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase">
+                <Sparkles className="h-2.5 w-2.5" />
+                Featured
+              </span>
+            )}
           </div>
 
-          {/* Date Published */}
-          <div className="flex items-center gap-2 text-neutral-500">
-            <Calendar className="h-3.5 w-3.5" />
-            <span className="text-xs tracking-wide">{formatDate(template.created_at)}</span>
+          {/* Author and Date - Horizontal Layout */}
+          <div className="flex items-center justify-between text-sm">
+            {/* Author - Clickable */}
+            <button
+              onClick={handleAuthorClick}
+              className="flex items-center gap-1.5 text-neutral-600 hover:text-neutral-900 transition-colors group/author"
+              disabled={!template.author_id}
+            >
+              <User className="h-3.5 w-3.5" />
+              <span className="group-hover/author:underline">
+                {template.author_name || 'Unknown'}
+              </span>
+            </button>
+
+            {/* Date Published */}
+            <div className="flex items-center gap-1.5 text-neutral-500">
+              <Calendar className="h-3.5 w-3.5" />
+              <span className="text-xs tracking-wide">{formatDate(template.created_at)}</span>
+            </div>
           </div>
 
           {/* Price */}
@@ -168,25 +183,6 @@ function TemplateCard({ template, onPreview }: TemplateCardProps) {
             <span className="text-xl font-semibold text-neutral-900 tracking-tight">
               {template.price || 'Free'}
             </span>
-          </div>
-
-          {/* Action Buttons */}
-          <div className="flex gap-3 pt-2">
-            <Button
-              size="sm"
-              className="flex-1 bg-neutral-900 hover:bg-neutral-800 text-white rounded-none h-11 text-xs font-medium tracking-wide uppercase"
-              onClick={() => window.open(template.storefront_url, '_blank')}
-            >
-              Buy Now
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="flex-1 border-neutral-300 hover:bg-neutral-50 text-neutral-700 rounded-none h-11 text-xs font-medium tracking-wide uppercase"
-              onClick={() => onPreview(template)}
-            >
-              Live Preview
-            </Button>
           </div>
         </div>
       </div>
@@ -204,6 +200,7 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
   const [loadingMore, setLoadingMore] = useState(false);
   const [pageInfo, setPageInfo] = useState({ current: 1, total: 0, hasNext: true });
   const [selectedTag, setSelectedTag] = useState<{ slug: string; type: 'subcategory' | 'style' | '' }>({ slug: '', type: '' });
+  const [selectedAuthor, setSelectedAuthor] = useState<{ id: string; name: string } | null>(null);
   const [collection, setCollection] = useState<'ultra' | 'all'>('ultra');
   const [subcategories, setSubcategories] = useState<{id: number; name: string; slug: string; display_name: string; template_count: number}[]>([]);
   const [styles, setStyles] = useState<{id: number; name: string; slug: string; display_name: string; template_count: number}[]>([]);
@@ -279,7 +276,10 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
         limit: '20'
       });
 
-      if (collection === 'ultra') {
+      // Add author filter if selected
+      if (selectedAuthor) {
+        params.append('author', selectedAuthor.id);
+      } else if (collection === 'ultra') {
         params.append('collection', 'ultra');
       } else if (selectedTag.slug) {
         if (selectedTag.type === 'subcategory') {
@@ -318,9 +318,9 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [collection, selectedTag.slug, selectedTag.type]);
+  }, [collection, selectedTag.slug, selectedTag.type, selectedAuthor]);
 
-  // Reset and fetch when tag changes
+  // Reset and fetch when filters change
   useEffect(() => {
     setTemplates([]);
     pageRef.current = 1;
@@ -334,6 +334,36 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
       fetchTemplates(pageRef.current, false);
     }
   }, [fetchTemplates, inView, templates.length]);
+
+  // Handle author click - filter by author
+  const handleAuthorClick = (authorId: string, authorName: string) => {
+    setCollection('all');
+    setSelectedTag({ slug: '', type: '' });
+    setSelectedAuthor({ id: authorId, name: authorName });
+  };
+
+  // Clear all filters
+  const clearFilters = () => {
+    setCollection('all');
+    setSelectedTag({ slug: '', type: '' });
+    setSelectedAuthor(null);
+  };
+
+  // Get active filter display text
+  const getActiveFilterText = () => {
+    if (selectedAuthor) {
+      return `Templates by ${selectedAuthor.name}`;
+    }
+    if (collection === 'ultra') {
+      return 'Ultra Featured';
+    }
+    if (selectedTag.slug) {
+      return allTags.find(t => t.slug === selectedTag.slug)?.display_name || selectedTag.slug;
+    }
+    return null;
+  };
+
+  const activeFilter = getActiveFilterText();
 
   return (
     <div className="min-h-screen bg-neutral-50">
@@ -381,9 +411,10 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                     onClick={() => {
                       setCollection('ultra');
                       setSelectedTag({ slug: '', type: '' });
+                      setSelectedAuthor(null);
                     }}
                     className={`w-full text-left px-4 py-3 text-sm transition-colors flex items-center justify-between ${
-                      collection === 'ultra'
+                      collection === 'ultra' && !selectedAuthor
                         ? 'bg-neutral-900 text-white'
                         : 'hover:bg-neutral-100 text-neutral-700'
                     }`}
@@ -397,9 +428,10 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                     onClick={() => {
                       setCollection('all');
                       setSelectedTag({ slug: '', type: '' });
+                      setSelectedAuthor(null);
                     }}
                     className={`w-full text-left px-4 py-3 text-sm transition-colors ${
-                      collection === 'all' && !selectedTag.slug
+                      collection === 'all' && !selectedTag.slug && !selectedAuthor
                         ? 'bg-neutral-900 text-white'
                         : 'hover:bg-neutral-100 text-neutral-700'
                     }`}
@@ -423,19 +455,16 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                         onClick={() => {
                           setCollection('all');
                           setSelectedTag({ slug: cat.slug, type: 'subcategory' });
+                          setSelectedAuthor(null);
                         }}
                         className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
-                          selectedTag.slug === cat.slug && selectedTag.type === 'subcategory'
+                          selectedTag.slug === cat.slug && selectedTag.type === 'subcategory' && !selectedAuthor
                             ? 'bg-neutral-900 text-white'
                             : 'hover:bg-neutral-100 text-neutral-700'
                         }`}
                       >
                         <span>{cat.display_name}</span>
-                        <span className={`text-xs ${
-                          selectedTag.slug === cat.slug && selectedTag.type === 'subcategory'
-                            ? 'text-neutral-400'
-                            : 'text-neutral-400'
-                        }`}>
+                        <span className="text-xs text-neutral-400">
                           {cat.template_count}
                         </span>
                       </button>
@@ -457,19 +486,16 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                         onClick={() => {
                           setCollection('all');
                           setSelectedTag({ slug: style.slug, type: 'style' });
+                          setSelectedAuthor(null);
                         }}
                         className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
-                          selectedTag.slug === style.slug && selectedTag.type === 'style'
+                          selectedTag.slug === style.slug && selectedTag.type === 'style' && !selectedAuthor
                             ? 'bg-neutral-900 text-white'
                             : 'hover:bg-neutral-100 text-neutral-700'
                         }`}
                       >
                         <span>{style.display_name}</span>
-                        <span className={`text-xs ${
-                          selectedTag.slug === style.slug && selectedTag.type === 'style'
-                            ? 'text-neutral-400'
-                            : 'text-neutral-400'
-                        }`}>
+                        <span className="text-xs text-neutral-400">
                           {style.template_count}
                         </span>
                       </button>
@@ -487,10 +513,11 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
             <div className="flex items-center gap-3 overflow-x-auto pb-2 scrollbar-hide">
               <Button
                 size="sm"
-                variant={collection === 'ultra' ? 'default' : 'outline'}
+                variant={collection === 'ultra' && !selectedAuthor ? 'default' : 'outline'}
                 onClick={() => {
                   setCollection('ultra');
                   setSelectedTag({ slug: '', type: '' });
+                  setSelectedAuthor(null);
                 }}
                 className="rounded-none shrink-0"
               >
@@ -499,10 +526,11 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
               </Button>
               <Button
                 size="sm"
-                variant={collection === 'all' && !selectedTag.slug ? 'default' : 'outline'}
+                variant={collection === 'all' && !selectedTag.slug && !selectedAuthor ? 'default' : 'outline'}
                 onClick={() => {
                   setCollection('all');
                   setSelectedTag({ slug: '', type: '' });
+                  setSelectedAuthor(null);
                 }}
                 className="rounded-none shrink-0"
               >
@@ -512,10 +540,11 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                 <Button
                   key={cat.id}
                   size="sm"
-                  variant={selectedTag.slug === cat.slug ? 'default' : 'outline'}
+                  variant={selectedTag.slug === cat.slug && !selectedAuthor ? 'default' : 'outline'}
                   onClick={() => {
                     setCollection('all');
                     setSelectedTag({ slug: cat.slug, type: 'subcategory' });
+                    setSelectedAuthor(null);
                   }}
                   className="rounded-none shrink-0"
                 >
@@ -526,35 +555,39 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
           </div>
 
           {/* Active Filter Display */}
-          {(selectedTag.slug || collection === 'ultra') && (
+          {activeFilter && (
             <div className="px-6 lg:px-12 py-4 bg-white border-b border-neutral-200">
               <div className="flex items-center gap-3">
                 <span className="text-sm text-neutral-500">Viewing:</span>
                 <Badge
                   variant="secondary"
-                  className="rounded-none bg-neutral-900 text-white hover:bg-neutral-800 cursor-pointer px-3 py-1"
-                  onClick={() => {
-                    if (collection === 'ultra') {
-                      setCollection('all');
-                    }
-                    setSelectedTag({ slug: '', type: '' });
-                  }}
+                  className="rounded-none bg-neutral-900 text-white hover:bg-neutral-800 cursor-pointer px-3 py-1 flex items-center gap-2"
+                  onClick={clearFilters}
                 >
-                  {collection === 'ultra'
-                    ? 'Ultra Featured'
-                    : allTags.find(t => t.slug === selectedTag.slug)?.display_name}
-                  <X className="h-3 w-3 ml-2" />
+                  {selectedAuthor && <User className="h-3 w-3" />}
+                  {activeFilter}
+                  <X className="h-3 w-3 ml-1" />
                 </Badge>
               </div>
             </div>
           )}
 
           {/* Collection Info Banner */}
-          {collection === 'ultra' && (
+          {collection === 'ultra' && !selectedAuthor && (
             <div className="px-6 lg:px-12 py-3 bg-neutral-100 border-b border-neutral-200">
               <p className="text-sm text-neutral-600 flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-neutral-500" />
                 Hand-picked premium templates curated by our team
+              </p>
+            </div>
+          )}
+
+          {/* Author Filter Info Banner */}
+          {selectedAuthor && (
+            <div className="px-6 lg:px-12 py-3 bg-neutral-100 border-b border-neutral-200">
+              <p className="text-sm text-neutral-600 flex items-center gap-2">
+                <User className="h-4 w-4 text-neutral-500" />
+                Showing all templates created by <span className="font-medium">{selectedAuthor.name}</span>
               </p>
             </div>
           )}
@@ -567,6 +600,7 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                   key={template.id}
                   template={template}
                   onPreview={setPreviewTemplate}
+                  onAuthorClick={handleAuthorClick}
                 />
               ))}
             </div>
@@ -637,10 +671,7 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                 <Button
                   variant="outline"
                   className="mt-4 rounded-none"
-                  onClick={() => {
-                    setCollection('all');
-                    setSelectedTag({ slug: '', type: '' });
-                  }}
+                  onClick={clearFilters}
                 >
                   View All Templates
                 </Button>
