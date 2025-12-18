@@ -109,7 +109,7 @@ export function BlacklistSection() {
       } else {
         throw new Error('Failed to remove');
       }
-    } catch (error) {
+    } catch {
       toast.error('Failed to remove from blacklist');
     }
   };

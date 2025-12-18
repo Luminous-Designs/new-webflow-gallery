@@ -245,7 +245,7 @@ export async function batchDetectHomepages(
 
       const detection = await detectHomepage(page, url);
       results.set(url, detection);
-    } catch (error) {
+    } catch {
       // On error, return the original URL
       results.set(url, {
         screenshotUrl: url,

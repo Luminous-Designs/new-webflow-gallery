@@ -26,11 +26,6 @@ type TableName =
   | 'screenshot_exclusions'
   | 'fresh_scrape_state'
   | 'fresh_scrape_screenshots'
-  | 'thumbnail_jobs'
-  | 'scrape_jobs'
-  | 'scrape_sessions'
-  | 'scrape_batches'
-  | 'batch_templates'
   | 'visitors'
   | 'purchases'
   | 'supabase_activity_log';
@@ -39,7 +34,7 @@ const TABLES: Array<{ group: string; items: TableName[] }> = [
   { group: 'Core', items: ['templates', 'subcategories', 'styles', 'features'] },
   { group: 'Relations', items: ['template_subcategories', 'template_styles', 'template_features', 'ultra_featured_templates'] },
   { group: 'Curation', items: ['featured_authors', 'template_blacklist', 'screenshot_exclusions'] },
-  { group: 'Scraping', items: ['fresh_scrape_state', 'fresh_scrape_screenshots', 'thumbnail_jobs', 'scrape_jobs', 'scrape_sessions', 'scrape_batches', 'batch_templates'] },
+  { group: 'Scraping', items: ['fresh_scrape_state', 'fresh_scrape_screenshots'] },
   { group: 'App', items: ['visitors', 'purchases'] },
   { group: 'Ops', items: ['supabase_activity_log'] },
 ];
@@ -310,4 +305,3 @@ export function SupabaseExplorerSection() {
     </div>
   );
 }
-

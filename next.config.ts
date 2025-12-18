@@ -19,6 +19,10 @@ const nextConfig: NextConfig = {
         protocol: 'https',
         hostname: 'webflow.com',
       },
+      {
+        protocol: 'https',
+        hostname: 'templates.luminardigital.com',
+      },
     ],
   },
   webpack: (config) => {

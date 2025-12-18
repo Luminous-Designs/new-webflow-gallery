@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useAdmin } from '../admin-context';
+import { toAssetUrl } from '@/lib/assets';
 import {
   Home,
   ArrowRight,
@@ -34,7 +35,7 @@ interface AlternateTemplate {
   live_preview_url: string;
   screenshot_url: string;
   alternate_homepage_path: string;
-  screenshot_thumbnail_path: string;
+  screenshot_path: string | null;
 }
 
 interface AlternateHomepageData {
@@ -169,9 +170,9 @@ export function AlternateHomepageMetricsSection() {
                       >
                         {/* Thumbnail */}
                         <div className="relative w-16 h-16 rounded overflow-hidden bg-gray-100 flex-shrink-0">
-                          {template.screenshot_thumbnail_path ? (
+                          {toAssetUrl(template.screenshot_path) ? (
                             <Image
-                              src={template.screenshot_thumbnail_path}
+                              src={toAssetUrl(template.screenshot_path)!}
                               alt={template.name}
                               fill
                               className="object-cover"

@@ -9,8 +9,7 @@ The screenshot mechanism uses a simple, fast approach: load the page, wait for a
 ## Core Components
 
 - **`lib/screenshot/prepare.ts`** - Main preparation function
-- **`lib/scraper/webflow-scraper.ts`** - Bulk template scraping
-- **`lib/screenshot/thumbnail-queue.ts`** - Background screenshot jobs
+- **`lib/scraper/fresh-scraper.ts`** - The supported scraper pipeline
 - **`app/api/admin/screenshot-test/route.ts`** - Admin testing endpoint
 
 ## Process Flow
@@ -61,18 +60,8 @@ Navigate to Admin → Screenshot Tools to:
 - Toggle exclusions on/off
 - Test screenshots with any URL
 
-### Database Table
-```sql
-CREATE TABLE screenshot_exclusions (
-  id INTEGER PRIMARY KEY,
-  selector TEXT UNIQUE NOT NULL,
-  selector_type TEXT DEFAULT 'class',
-  description TEXT,
-  is_active BOOLEAN DEFAULT 1,
-  created_at DATETIME,
-  updated_at DATETIME
-);
-```
+### Storage
+Exclusions are stored in Supabase in the `screenshot_exclusions` table.
 
 ## Timing
 

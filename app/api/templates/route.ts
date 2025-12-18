@@ -19,7 +19,6 @@ const TEMPLATE_CARD_SELECT = `
   price,
   short_description,
   screenshot_path,
-  screenshot_thumbnail_path,
   is_featured,
   is_cms,
   is_ecommerce,

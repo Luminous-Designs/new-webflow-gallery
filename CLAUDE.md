@@ -1,228 +1,41 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for coding agents working in this repository.
 
-## Project Overview
+## Canonical architecture
 
-Modern Webflow Gallery - A Next.js 15 application for Luminous Web Design Agency featuring a Webflow template gallery with automated scraping, admin dashboard, and client onboarding flow.
+See `knowledge-base/12-18-25-architecture.md` for the source-of-truth architecture and runbook.
 
-## Key Commands
+Key points:
+- Template metadata lives in **Supabase Postgres**.
+- Screenshots live on the **VPS filesystem** and are served from `https://templates.luminardigital.com/screenshots/...`.
+- The UI loads screenshots via `NEXT_PUBLIC_ASSET_BASE_URL` even on localhost.
+- The only supported scraper pipeline is **FreshScraper**.
+
+## Commands
 
 ```bash
-# Development
-npm run dev          # Start development server on localhost:3000
-npm run build        # Build for production
-npm run start        # Start production server
-npm run lint         # Run ESLint
+npm run dev
+npm run build
+npm run start
+npm run lint
 
-# Database setup (first run)
-mkdir -p data public/screenshots public/thumbnails
-
-# Playwright setup (required for scraper)
+# Playwright (required for scraping)
 npx playwright install chromium
 ```
 
-## Architecture
+## Required env vars
 
-### Core Technologies
-- **Framework**: Next.js 15 with App Router and Turbopack
-- **Language**: TypeScript 5.9
-- **Styling**: Tailwind CSS v4 with shadcn/ui components
-- **Database**: SQLite3 with WAL mode and custom async wrapper
-- **Scraping**: Playwright with multi-browser parallelization
-- **Images**: Sharp for WebP optimization
-- **State Management**: TanStack React Query
+```bash
+# Supabase
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+SUPABASE_SERVICE_ROLE_KEY=...
 
-### Directory Structure
-- `/app` - Next.js App Router pages and API routes
-  - `/api` - API endpoints for templates, admin, pricing
-  - `/admin` - Protected admin dashboard
-- `/components` - React components
-  - `/ui` - shadcn/ui components
-- `/lib` - Core utilities
-  - `/db` - SQLite database wrapper (`index.ts`) and schema (`schema.sql`)
-  - `/scraper` - Webflow template scraping (supports batch, fresh, and single-URL modes)
-  - `/screenshot` - Screenshot preparation and thumbnail queue processing
-  - `/sync` - Platform synchronization utilities
+# Admin auth
+ADMIN_PASSWORD=...
 
-### Database Architecture
-The SQLite database (`./data/webflow.db`) uses WAL mode for concurrent access with:
-
-**Core Tables:**
-- `templates` - Template data with alternate homepage detection fields
-- `subcategories`, `styles`, `features` - Template metadata (many-to-many via junction tables)
-- `featured_authors`, `ultra_featured_templates` - Curation tables
-
-**Scraping Tables:**
-- `scrape_jobs`, `scrape_logs` - Simple job tracking
-- `scrape_sessions`, `scrape_batches`, `batch_templates` - Batch scraping with pause/resume
-- `fresh_scrape_state`, `fresh_scrape_screenshots` - Fresh scrape operations
-- `template_blacklist` - Skip problematic templates
-
-**Analytics Tables:**
-- `visitors`, `purchases` - User tracking
-- `system_metrics`, `api_metrics`, `preview_metrics`, `page_views`, `system_health`
-
-Database wrapper (`lib/db/index.ts`) features:
-- Async/await interface with retry logic for SQLITE_BUSY errors
-- Write queue serialization to prevent lock contention
-- Transactions with savepoint support for nesting
-- Automatic schema initialization on startup
-
-### Scraping System
-Three scraping modes in `/lib/scraper/`:
-
-1. **WebflowScraper** (`webflow-scraper.ts`) - Main scraper class
-   - Fetches sitemap from `templates.webflow.com/sitemap.xml`
-   - Only scrapes `/html/` URLs (skips category pages)
-   - Multi-browser worker pool with round-robin distribution
-   - Automatic retry with adaptive wait strategies (domcontentloaded → load → networkidle)
-   - Homepage detection for templates with non-index landing pages
-
-2. **BatchScraper** (`batch-scraper.ts`) - Pausable batch operations
-3. **FreshScraper** (`fresh-scraper.ts`) - Full database rebuild with featured author priority
-
-### Environment Configuration
-Required variables:
-```
-DATABASE_PATH=./data/webflow.db
-ADMIN_PASSWORD=<admin access>
-NEXT_PUBLIC_ADMIN_PASSWORD=<client-side admin check>
-RESEND_API_KEY=<for email notifications>
-NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=<for payments>
-STRIPE_SECRET_KEY=<for payments>
-SCRAPER_CONCURRENCY=5
-SCRAPER_TIMEOUT=30000
-SCREENSHOT_QUALITY=85
+# Screenshot asset host (VPS)
+NEXT_PUBLIC_ASSET_BASE_URL=https://templates.luminardigital.com
 ```
 
-### API Patterns
-- REST endpoints in `/app/api/*`
-- Admin routes under `/api/admin/*` require password verification
-- Progress streaming via dynamic route params (e.g., `/api/admin/scrape/progress/[jobId]`)
-- EventEmitter pattern for real-time scraper progress
-
-### Image Handling
-- Remote images from `cdn.prod.website-files.com` and `*.webflow.io` configured in `next.config.ts`
-- Screenshots stored as WebP in `/public/screenshots` (1000px width)
-- Thumbnails stored as WebP in `/public/thumbnails` (500x500 square crop from top)
-- Element exclusions configurable via `screenshot_exclusions` table
-
-## Development Workflow
-
-1. **Database Changes**: Modify `lib/db/schema.sql`, delete `data/webflow.db`, restart app
-2. **Adding API Endpoints**: Follow pattern in existing routes, use `db.runAsync`/`db.getAsync`/`db.allAsync`
-3. **Scraping**: Test with single URL via admin dashboard before full scrape
-4. **Component Development**: Use existing shadcn/ui components from `/components/ui`
-
-## Admin Dashboard (`/admin`)
-Password-protected access with tabs for:
-- Scraping controls (full, update, single URL, fresh scrape)
-- Featured/ultra-featured template management
-- Screenshot exclusion rules
-- Storage and database statistics
-- Template blacklist management
-- System metrics and health
-- VPS Image Sync management
-
-## VPS Image Sync System
-
-### Overview
-The VPS sync system (`/lib/sync/`) enables cross-platform synchronization of screenshots and thumbnails between local development machines and the VPS production server using `rsync` over SSH.
-
-### Platform Support
-The system auto-detects the platform and available tools (`lib/sync/platform.ts`):
-
-**Windows:**
-- Uses Windows OpenSSH (built-in since Windows 10)
-- Supports cwRsync, Git Bash rsync, MSYS2, or Cygwin for rsync
-- Automatically handles path conversions (`C:\` → `/cygdrive/c/` for cwRsync)
-- SSH key typically at `~/.ssh/id_ed25519` or `C:\Users\<name>\.ssh\id_ed25519`
-
-**macOS/Linux:**
-- Uses standard `ssh` and `rsync` commands
-- SSH key typically at `~/.ssh/id_ed25519`
-
-### VPS Configuration
-Default settings (configurable in admin UI):
-```
-VPS Host: 178.156.177.252
-User: root
-Remote Path: /data/webflow-gallery
-SSH Key: ~/.ssh/id_ed25519
-```
-
-Remote directory structure:
-- `/data/webflow-gallery/screenshots/` - Full-size screenshot WebP files
-- `/data/webflow-gallery/thumbnails/` - Thumbnail WebP files
-
-### Sync Operations
-Three sync directions available, all using **SQLite as the source of truth**:
-
-1. **Push**: Upload local images to VPS
-   - Adds/updates files on VPS (does not delete)
-   - Use after scraping new templates locally
-
-2. **Pull**: Replace local images with VPS content
-   - Uses `--delete` flag to mirror VPS to local
-   - After rsync, removes any local files not in the SQLite database
-   - Use when setting up a new dev environment
-
-3. **Bidirectional**: Sync only database files both ways
-   - Only syncs files that exist in the SQLite database
-   - Pulls DB files from VPS, then pushes DB files to VPS
-   - Cleans up local excess files not in database
-   - Use to keep both environments aligned with the database
-
-### Delete Excess Files Feature
-Cleans up orphaned images on the VPS that have no corresponding template in the SQLite database.
-
-**Source of Truth**: The SQLite database is always the source of truth. Files on VPS are compared against template slugs in the database.
-
-**How it works**:
-1. Queries all template slugs from SQLite database
-2. Lists all files on VPS via SSH
-3. Identifies files on VPS with no matching template (orphaned)
-4. Deletes orphaned files in batches of 100 via SSH
-
-**API Endpoints** (`/api/admin/sync`):
-- `GET ?action=analyze-excess` - Analyze VPS for excess files
-- `GET ?action=delete-excess-status` - Get deletion progress
-- `POST action=delete-excess` - Start deletion of excess files
-- `POST action=clear-delete-progress` - Clear deletion state
-
-**File naming convention**:
-- Screenshots: `{slug}.webp`
-- Thumbnails: `{slug}_thumb.webp`
-
-### API Reference (`/api/admin/sync`)
-**GET Actions:**
-- `status` - Current sync operation status
-- `test-connection` - Test VPS SSH connectivity
-- `local-stats` - Local file counts and sizes
-- `vps-stats` - VPS file counts and sizes
-- `compare` - Full comparison with discrepancies
-- `platform` - Re-detect platform and tools
-- `analyze-excess` - Find orphaned files on VPS
-- `delete-excess-status` - Get deletion progress
-
-**POST Actions:**
-- `start` - Start rsync (requires `direction`: push/pull/bidirectional)
-  - `pull`: Uses `--delete` to mirror VPS, then cleans up local excess
-  - `bidirectional`: Syncs only files in database, cleans up local excess
-- `pause` - Pause running sync
-- `stop` - Stop running sync
-- `clear` - Clear sync session
-- `delete-excess` - Delete orphaned files from VPS
-- `clear-delete-progress` - Clear deletion state
-
-### Cross-Platform Support
-**Windows:**
-- Uses Windows OpenSSH (built-in since Windows 10)
-- Supports cwRsync, Git Bash rsync, MSYS2, or Cygwin
-- Path conversion: `C:\` → `/cygdrive/c/` for cwRsync
-- Command execution via `cmd.exe` shell
-
-**macOS/Linux:**
-- Standard `ssh` and `rsync` commands
-- Command execution via `/bin/bash` shell

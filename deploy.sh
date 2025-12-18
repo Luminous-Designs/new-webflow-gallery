@@ -1,7 +1,11 @@
 #!/bin/bash
 
 # Deploy script for Modern Webflow Gallery
-# This script syncs images to/from VPS and pushes code to GitHub
+# Legacy helper: sync screenshots to/from VPS and push code to GitHub.
+#
+# The preferred workflow is to run the scraper on the VPS so screenshots are
+# written directly into the mounted `/app/public/screenshots` volume and served
+# from `https://templates.luminardigital.com/screenshots/...`.
 
 set -e  # Exit on any error
 
@@ -25,41 +29,35 @@ show_menu() {
     echo ""
     echo -e "${YELLOW}What would you like to do?${NC}"
     echo ""
-    echo "  1) Push to VPS    - Send local images TO the VPS"
-    echo "  2) Pull from VPS  - Download VPS images to local"
-    echo "  3) Sync both ways - Full bidirectional sync"
+    echo "  1) Push to VPS    - Send local screenshots TO the VPS"
+    echo "  2) Pull from VPS  - Download VPS screenshots to local"
+    echo "  3) Sync both ways - Bidirectional screenshot sync"
     echo "  4) Git operations - Commit and push code"
-    echo "  5) Full deploy    - Push images + Git push"
+    echo "  5) Full deploy    - Push screenshots + Git push"
     echo "  6) Exit"
     echo ""
 }
 
 show_local_stats() {
     SCREENSHOT_COUNT=$(ls public/screenshots/ 2>/dev/null | wc -l | tr -d ' ')
-    THUMBNAIL_COUNT=$(ls public/thumbnails/ 2>/dev/null | wc -l | tr -d ' ')
     SCREENSHOT_SIZE=$(du -sh public/screenshots/ 2>/dev/null | cut -f1 || echo "0B")
-    THUMBNAIL_SIZE=$(du -sh public/thumbnails/ 2>/dev/null | cut -f1 || echo "0B")
 
     echo -e "${BLUE}Local Storage:${NC}"
     echo -e "  Screenshots: ${GREEN}$SCREENSHOT_COUNT files${NC} ($SCREENSHOT_SIZE)"
-    echo -e "  Thumbnails:  ${GREEN}$THUMBNAIL_COUNT files${NC} ($THUMBNAIL_SIZE)"
     echo ""
 }
 
 show_vps_stats() {
     echo -e "${BLUE}VPS Storage:${NC}"
     VPS_SCREENSHOT_COUNT=$(ssh ${VPS_USER}@${VPS_HOST} "ls ${VPS_IMAGE_PATH}/screenshots/ 2>/dev/null | wc -l" 2>/dev/null || echo "0")
-    VPS_THUMBNAIL_COUNT=$(ssh ${VPS_USER}@${VPS_HOST} "ls ${VPS_IMAGE_PATH}/thumbnails/ 2>/dev/null | wc -l" 2>/dev/null || echo "0")
     VPS_SCREENSHOT_SIZE=$(ssh ${VPS_USER}@${VPS_HOST} "du -sh ${VPS_IMAGE_PATH}/screenshots/ 2>/dev/null | cut -f1" 2>/dev/null || echo "0B")
-    VPS_THUMBNAIL_SIZE=$(ssh ${VPS_USER}@${VPS_HOST} "du -sh ${VPS_IMAGE_PATH}/thumbnails/ 2>/dev/null | cut -f1" 2>/dev/null || echo "0B")
 
     echo -e "  Screenshots: ${GREEN}$VPS_SCREENSHOT_COUNT files${NC} ($VPS_SCREENSHOT_SIZE)"
-    echo -e "  Thumbnails:  ${GREEN}$VPS_THUMBNAIL_COUNT files${NC} ($VPS_THUMBNAIL_SIZE)"
     echo ""
 }
 
 push_to_vps() {
-    echo -e "${YELLOW}[PUSH] Syncing local images TO VPS...${NC}"
+    echo -e "${YELLOW}[PUSH] Syncing local screenshots TO VPS...${NC}"
     echo ""
 
     echo -e "${YELLOW}  → Pushing screenshots...${NC}"
@@ -67,42 +65,30 @@ push_to_vps() {
     echo -e "${GREEN}  ✓ Screenshots pushed!${NC}"
     echo ""
 
-    echo -e "${YELLOW}  → Pushing thumbnails...${NC}"
-    rsync -avz --progress public/thumbnails/ ${VPS_USER}@${VPS_HOST}:${VPS_IMAGE_PATH}/thumbnails/
-    echo -e "${GREEN}  ✓ Thumbnails pushed!${NC}"
-    echo ""
-
     echo -e "${GREEN}Push complete!${NC}"
 }
 
 pull_from_vps() {
-    echo -e "${YELLOW}[PULL] Downloading VPS images to local...${NC}"
+    echo -e "${YELLOW}[PULL] Downloading VPS screenshots to local...${NC}"
     echo ""
 
     # Create directories if they don't exist
     mkdir -p public/screenshots
-    mkdir -p public/thumbnails
 
     echo -e "${YELLOW}  → Pulling screenshots...${NC}"
     rsync -avz --progress ${VPS_USER}@${VPS_HOST}:${VPS_IMAGE_PATH}/screenshots/ public/screenshots/
     echo -e "${GREEN}  ✓ Screenshots downloaded!${NC}"
     echo ""
 
-    echo -e "${YELLOW}  → Pulling thumbnails...${NC}"
-    rsync -avz --progress ${VPS_USER}@${VPS_HOST}:${VPS_IMAGE_PATH}/thumbnails/ public/thumbnails/
-    echo -e "${GREEN}  ✓ Thumbnails downloaded!${NC}"
-    echo ""
-
     echo -e "${GREEN}Pull complete!${NC}"
 }
 
 sync_bidirectional() {
-    echo -e "${YELLOW}[SYNC] Bidirectional sync (newest wins)...${NC}"
+    echo -e "${YELLOW}[SYNC] Bidirectional screenshot sync (newest wins)...${NC}"
     echo ""
 
     # Create directories if they don't exist
     mkdir -p public/screenshots
-    mkdir -p public/thumbnails
 
     echo -e "${YELLOW}  → Syncing screenshots (bidirectional)...${NC}"
     # Pull first (get any new files from VPS)
@@ -110,12 +96,6 @@ sync_bidirectional() {
     # Then push (send any new local files)
     rsync -avzu --progress public/screenshots/ ${VPS_USER}@${VPS_HOST}:${VPS_IMAGE_PATH}/screenshots/
     echo -e "${GREEN}  ✓ Screenshots synced!${NC}"
-    echo ""
-
-    echo -e "${YELLOW}  → Syncing thumbnails (bidirectional)...${NC}"
-    rsync -avzu --progress ${VPS_USER}@${VPS_HOST}:${VPS_IMAGE_PATH}/thumbnails/ public/thumbnails/
-    rsync -avzu --progress public/thumbnails/ ${VPS_USER}@${VPS_HOST}:${VPS_IMAGE_PATH}/thumbnails/
-    echo -e "${GREEN}  ✓ Thumbnails synced!${NC}"
     echo ""
 
     echo -e "${GREEN}Bidirectional sync complete!${NC}"

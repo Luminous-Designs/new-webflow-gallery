@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
-  supabase,
   supabaseAdmin,
   checkConnection,
-  getConnectionStatus,
   getStats,
   getSupabaseConfig,
   getRecentActivityLogs,
@@ -127,12 +125,6 @@ export async function GET(request: NextRequest) {
           'screenshot_exclusions',
           'fresh_scrape_state',
           'fresh_scrape_screenshots',
-          'thumbnail_jobs',
-          'scrape_jobs',
-          'scrape_sessions',
-          'scrape_batches',
-          'batch_templates',
-          'session_resume_points',
           'visitors',
           'purchases',
           'supabase_activity_log',
@@ -165,7 +157,7 @@ export async function GET(request: NextRequest) {
 
         const { data, error } = await db
           .from('templates')
-          .select('id, name, slug, author_name, screenshot_thumbnail_path, created_at, updated_at')
+          .select('id, name, slug, author_name, screenshot_path, created_at, updated_at')
           .order('created_at', { ascending: false })
           .limit(limit);
 

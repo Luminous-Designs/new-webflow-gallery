@@ -68,6 +68,7 @@ export interface FreshScrapeState {
 }
 
 export interface FreshScrapeConfig {
+  jobMode?: 'full' | 'screenshots_only';
   concurrency: number;
   browserInstances: number;
   pagesPerBrowser: number;
@@ -82,17 +83,6 @@ export interface FreshScrapeConfig {
   screenshotStabilityCheckIntervalMs: number;
   screenshotJpegQuality: number;
   screenshotWebpQuality: number;
-  thumbnailWebpQuality: number;
-}
-
-interface FreshScrapeScreenshot {
-  id: number;
-  fresh_scrape_id: number;
-  template_name: string | null;
-  template_slug: string | null;
-  screenshot_thumbnail_path: string | null;
-  is_featured_author: boolean;
-  captured_at: string;
 }
 
 // Helper to check for active fresh scrape
@@ -245,11 +235,49 @@ async function computeIncrementalScrapePlan(options?: { includeUpdates?: boolean
   };
 }
 
+async function fetchAllStorefrontUrlsFromDatabase(): Promise<string[]> {
+  const urls: string[] = [];
+  const pageSize = 1000;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from('templates')
+      .select('storefront_url')
+      .order('id', { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    for (const row of data) {
+      const url = (row.storefront_url as string | null) || null;
+      if (url) urls.push(url);
+    }
+    if (data.length < pageSize) break;
+  }
+  return urls;
+}
+
+async function wipeLocalScreenshots(): Promise<{ screenshotsDeleted: number }> {
+  let screenshotsDeleted = 0;
+
+  const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
+
+  try {
+    const screenshotFiles = await fs.readdir(screenshotDir);
+    for (const file of screenshotFiles) {
+      if (file.endsWith('.webp') || file.endsWith('.jpg') || file.endsWith('.jpeg') || file.endsWith('.png')) {
+        await fs.unlink(path.join(screenshotDir, file));
+        screenshotsDeleted++;
+      }
+    }
+  } catch {
+    // Directory may not exist
+  }
+  return { screenshotsDeleted };
+}
+
 // Helper to delete all template data and files
-async function deleteAllData(): Promise<{ templatesDeleted: number; screenshotsDeleted: number; thumbnailsDeleted: number }> {
+async function deleteAllData(): Promise<{ templatesDeleted: number; screenshotsDeleted: number }> {
   let templatesDeleted = 0;
   let screenshotsDeleted = 0;
-  let thumbnailsDeleted = 0;
 
   // Count templates before deletion
   const { count } = await supabase
@@ -318,35 +346,10 @@ async function deleteAllData(): Promise<{ templatesDeleted: number; screenshotsD
     await supabase.from('fresh_scrape_screenshots').delete().neq('id', 0);
   }
 
-  // Delete screenshot files
-  const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
-  const thumbnailDir = path.join(process.cwd(), 'public', 'thumbnails');
+  const wiped = await wipeLocalScreenshots();
+  screenshotsDeleted = wiped.screenshotsDeleted;
 
-  try {
-    const screenshotFiles = await fs.readdir(screenshotDir);
-    for (const file of screenshotFiles) {
-      if (file.endsWith('.webp') || file.endsWith('.jpg') || file.endsWith('.jpeg') || file.endsWith('.png')) {
-        await fs.unlink(path.join(screenshotDir, file));
-        screenshotsDeleted++;
-      }
-    }
-  } catch {
-    // Directory may not exist
-  }
-
-  try {
-    const thumbnailFiles = await fs.readdir(thumbnailDir);
-    for (const file of thumbnailFiles) {
-      if (file.endsWith('.webp') || file.endsWith('.jpg') || file.endsWith('.jpeg') || file.endsWith('.png')) {
-        await fs.unlink(path.join(thumbnailDir, file));
-        thumbnailsDeleted++;
-      }
-    }
-  } catch {
-    // Directory may not exist
-  }
-
-  return { templatesDeleted, screenshotsDeleted, thumbnailsDeleted };
+  return { templatesDeleted, screenshotsDeleted };
 }
 
 // POST handler
@@ -367,6 +370,138 @@ export async function POST(request: NextRequest) {
     const urls = body.urls as string[] | undefined;
 
     switch (action) {
+      case 'start_fresh': {
+        const existing = await getActiveFreshScrape();
+        if (existing) {
+          return NextResponse.json({ error: 'A scrape is already in progress', state: existing }, { status: 400 });
+        }
+
+        const confirm = typeof body.confirm === 'string' ? body.confirm : '';
+        if (confirm !== 'DELETE_ALL') {
+          return NextResponse.json(
+            { error: 'Confirmation required. Send { action: \"start_fresh\", confirm: \"DELETE_ALL\" } to proceed.' },
+            { status: 400 }
+          );
+        }
+
+        const baseConfig: FreshScrapeConfig = {
+          concurrency: 5,
+          browserInstances: 2,
+          pagesPerBrowser: 5,
+          batchSize: 10,
+          timeout: 45000,
+          screenshotAnimationWaitMs: 3000,
+          screenshotNudgeScrollRatio: 0.2,
+          screenshotNudgeWaitMs: 500,
+          screenshotNudgeAfterMs: 500,
+          screenshotStabilityStableMs: 1000,
+          screenshotStabilityMaxWaitMs: 7000,
+          screenshotStabilityCheckIntervalMs: 250,
+          screenshotJpegQuality: 80,
+          screenshotWebpQuality: 75,
+          jobMode: 'full',
+        };
+        const freshConfig: FreshScrapeConfig = {
+          ...baseConfig,
+          ...(config ? (clampFreshScraperConfig(config) as Partial<FreshScrapeConfig>) : {})
+        };
+
+        const deletion = await deleteAllData();
+        const sitemapEntries = await fetchSitemapEntries();
+        const urlsToScrape = sitemapEntries.map(e => e.url);
+
+        const { data: state, error: insertError } = await supabase
+          .from('fresh_scrape_state')
+          .insert({
+            status: 'scraping_regular',
+            phase: 'regular_scrape',
+            total_sitemap_count: urlsToScrape.length,
+            regular_template_urls: JSON.stringify(urlsToScrape),
+            regular_total: urlsToScrape.length,
+            config: JSON.stringify(freshConfig),
+            started_at: new Date().toISOString(),
+            deletion_completed_at: new Date().toISOString(),
+          })
+          .select()
+          .single();
+
+        if (insertError) throw insertError;
+
+        return NextResponse.json({
+          message: 'Fresh scrape initialized (database + images wiped)',
+          deletion,
+          state
+        });
+      }
+
+      case 'start_rescreenshot_all': {
+        const existing = await getActiveFreshScrape();
+        if (existing) {
+          return NextResponse.json(
+            { error: 'A scrape is already in progress', state: existing },
+            { status: 400 }
+          );
+        }
+
+        const wipe = body.wipeImages === true;
+        if (wipe) {
+          const confirm = typeof body.confirm === 'string' ? body.confirm : '';
+          if (confirm !== 'WIPE_SCREENSHOTS' && confirm !== 'WIPE_IMAGES') {
+            return NextResponse.json(
+              { error: 'Confirmation required. Send { action: \"start_rescreenshot_all\", wipeImages: true, confirm: \"WIPE_SCREENSHOTS\" } to proceed.' },
+              { status: 400 }
+            );
+          }
+        }
+
+        const baseConfig: FreshScrapeConfig = {
+          concurrency: 5,
+          browserInstances: 2,
+          pagesPerBrowser: 5,
+          batchSize: 10,
+          timeout: 45000,
+          screenshotAnimationWaitMs: 3000,
+          screenshotNudgeScrollRatio: 0.2,
+          screenshotNudgeWaitMs: 500,
+          screenshotNudgeAfterMs: 500,
+          screenshotStabilityStableMs: 1000,
+          screenshotStabilityMaxWaitMs: 7000,
+          screenshotStabilityCheckIntervalMs: 250,
+          screenshotJpegQuality: 80,
+          screenshotWebpQuality: 75,
+          jobMode: 'screenshots_only',
+        };
+        const rescreenshotConfig: FreshScrapeConfig = {
+          ...baseConfig,
+          ...(config ? (clampFreshScraperConfig(config) as Partial<FreshScrapeConfig>) : {})
+        };
+
+        const wiped = wipe ? await wipeLocalScreenshots() : { screenshotsDeleted: 0 };
+        const urlsToScrape = await fetchAllStorefrontUrlsFromDatabase();
+
+        const { data: state, error: insertError } = await supabase
+          .from('fresh_scrape_state')
+          .insert({
+            status: 'scraping_regular',
+            phase: 'regular_scrape',
+            total_sitemap_count: urlsToScrape.length,
+            regular_template_urls: JSON.stringify(urlsToScrape),
+            regular_total: urlsToScrape.length,
+            config: JSON.stringify(rescreenshotConfig),
+            started_at: new Date().toISOString(),
+          })
+          .select()
+          .single();
+
+        if (insertError) throw insertError;
+
+        return NextResponse.json({
+          message: 'Rescreenshot-all initialized',
+          wiped: wiped,
+          state
+        });
+      }
+
       case 'start': {
         // Backward compatible: "start" now runs an incremental update scrape (no destructive deletes).
         const existing = await getActiveFreshScrape();
@@ -390,7 +525,7 @@ export async function POST(request: NextRequest) {
           screenshotStabilityCheckIntervalMs: 250,
           screenshotJpegQuality: 80,
           screenshotWebpQuality: 75,
-          thumbnailWebpQuality: 60
+          jobMode: 'full',
         };
         const defaultConfig: FreshScrapeConfig = {
           ...baseConfig,
@@ -511,7 +646,7 @@ export async function POST(request: NextRequest) {
           screenshotStabilityCheckIntervalMs: 250,
           screenshotJpegQuality: 80,
           screenshotWebpQuality: 75,
-          thumbnailWebpQuality: 60
+          jobMode: 'full',
         };
         const updateConfig: FreshScrapeConfig = {
           ...baseConfig,
@@ -570,7 +705,7 @@ export async function POST(request: NextRequest) {
             screenshotStabilityCheckIntervalMs: 250,
             screenshotJpegQuality: 80,
             screenshotWebpQuality: 75,
-            thumbnailWebpQuality: 60
+            jobMode: 'full',
           })
           : {
             concurrency: 5,
@@ -587,7 +722,7 @@ export async function POST(request: NextRequest) {
             screenshotStabilityCheckIntervalMs: 250,
             screenshotJpegQuality: 80,
             screenshotWebpQuality: 75,
-            thumbnailWebpQuality: 60
+            jobMode: 'full',
           };
 
         const newConfig: FreshScrapeConfig = {
@@ -807,7 +942,10 @@ export async function POST(request: NextRequest) {
         }
         const templateName = typeof body.templateName === 'string' ? body.templateName : null;
         const templateSlug = typeof body.templateSlug === 'string' ? body.templateSlug : null;
-        const thumbnailPath = typeof body.thumbnailPath === 'string' ? body.thumbnailPath : null;
+        const screenshotPath =
+          typeof body.screenshotPath === 'string'
+            ? body.screenshotPath
+            : (typeof body.thumbnailPath === 'string' ? body.thumbnailPath : null);
         const isFeaturedAuthor = body.isFeaturedAuthor === true;
 
         await supabase
@@ -816,7 +954,7 @@ export async function POST(request: NextRequest) {
             fresh_scrape_id: stateId,
             template_name: templateName,
             template_slug: templateSlug,
-            screenshot_thumbnail_path: thumbnailPath,
+            screenshot_thumbnail_path: screenshotPath,
             is_featured_author: isFeaturedAuthor
           });
 

@@ -9,11 +9,8 @@ import {
   SystemSection,
   AuthorsSection,
   UltraFeaturedSection,
-  ImagesSection,
   VisitorsSection,
   PurchasesSection,
-  StorageSection,
-  SyncSection,
   SupabaseExplorerSection
 } from '@/components/admin';
 import type { AdminSection } from '@/components/admin';
@@ -33,24 +30,25 @@ function AdminDashboard() {
         return <AuthorsSection />;
       case 'ultra':
         return <UltraFeaturedSection />;
-      case 'images':
-        return <ImagesSection />;
       case 'visitors':
         return <VisitorsSection />;
       case 'purchases':
         return <PurchasesSection />;
-      case 'storage':
-        return <StorageSection />;
       case 'supabase-explorer':
         return <SupabaseExplorerSection />;
-      case 'sync':
-        return <SyncSection />;
       default:
         return null;
     }
   };
 
-  return <AdminLayout renderSection={renderSection} />;
+  return (
+    <AdminLayout
+      renderSection={(section, onNavigate) => {
+        void onNavigate;
+        return renderSection(section);
+      }}
+    />
+  );
 }
 
 export default function AdminPage() {

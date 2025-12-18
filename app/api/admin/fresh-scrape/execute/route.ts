@@ -71,7 +71,7 @@ interface ScraperEvents {
   recentScreenshots: Array<{
     name: string;
     slug: string;
-    thumbnailPath: string;
+    screenshotPath: string;
     isFeaturedAuthor: boolean;
     timestamp: string;
   }>;
@@ -168,8 +168,7 @@ export async function POST(request: NextRequest) {
           screenshotStabilityMaxWaitMs: 7000,
           screenshotStabilityCheckIntervalMs: 250,
           screenshotJpegQuality: 80,
-          screenshotWebpQuality: 75,
-          thumbnailWebpQuality: 60
+          screenshotWebpQuality: 75
         };
 
 	        const stateConfigRaw = (state as unknown as { config?: unknown } | null)?.config;
@@ -237,7 +236,7 @@ export async function POST(request: NextRequest) {
               fresh_scrape_id: stateId,
               template_name: data.name,
               template_slug: data.slug,
-              screenshot_thumbnail_path: data.thumbnailPath,
+              screenshot_thumbnail_path: data.screenshotPath,
               is_featured_author: data.isFeaturedAuthor,
             });
           } catch {

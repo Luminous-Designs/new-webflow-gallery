@@ -26,7 +26,7 @@ This document describes the server and client adjustments that were introduced t
 ## Background Notes
 
 - All adjustments are backwards compatible with the existing database schema; no migrations are required.
-- The metrics and scraper subsystems still rely on the same Playwright/SQLite pipelines. If the scraper concurrency is increased, consider tuning `SCRAPER_CONCURRENCY` in the environment rather than re-introducing broader selects.
+- The scraper subsystem relies on Playwright + Supabase writes. If scraper concurrency is increased, prefer tuning `SCRAPER_CONCURRENCY` and screenshot timing controls rather than adding heavier per-template queries.
 - `npm run lint` reports pre-existing lint violations (unused imports, `<img>` usage, etc.). They are unchanged by these optimisations but are listed here for awareness.
 
 Feel free to extend this document when new performance work lands so future maintainers can reason about trade-offs that have already been made.

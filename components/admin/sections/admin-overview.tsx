@@ -2,7 +2,6 @@
 
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import { useAdmin } from '../admin-context';
 import {
   Package,
@@ -12,11 +11,11 @@ import {
   Cloud,
   Laptop,
   Images,
-  Image as ImageIcon,
+  Camera,
   Database,
+  Sparkles,
   FolderOpen,
   AlertTriangle,
-  Loader2
 } from 'lucide-react';
 import type { AdminSection } from '../admin-sidebar';
 
@@ -25,7 +24,7 @@ interface AdminOverviewProps {
 }
 
 export function AdminOverview({ onNavigate }: AdminOverviewProps) {
-  const { stats, systemStats, thumbnailQueueCounts, thumbnailJobs, fetchThumbnailJobs, formatBytes } = useAdmin();
+  const { stats, systemStats, formatBytes } = useAdmin();
 
   return (
     <div className="space-y-6">
@@ -68,7 +67,7 @@ export function AdminOverview({ onNavigate }: AdminOverviewProps) {
           </div>
 
           {/* Storage Breakdown */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-2 gap-3">
             <div className="text-center p-3 bg-white/60 rounded-lg border">
               <Images className="h-5 w-5 mx-auto text-purple-500 mb-1" />
               <div className="text-lg font-bold text-gray-800">
@@ -78,23 +77,6 @@ export function AdminOverview({ onNavigate }: AdminOverviewProps) {
               <div className="text-xs text-gray-400">
                 {formatBytes(systemStats?.storage?.screenshots || 0)}
               </div>
-            </div>
-            <div className="text-center p-3 bg-white/60 rounded-lg border">
-              <ImageIcon className="h-5 w-5 mx-auto text-indigo-500 mb-1" />
-              <div className="text-lg font-bold text-gray-800">
-                {systemStats?.storage?.thumbnailCount ?? 0}
-              </div>
-              <div className="text-xs text-gray-500">Thumbnails</div>
-              <div className="text-xs text-gray-400">
-                {formatBytes(systemStats?.storage?.thumbnails || 0)}
-              </div>
-            </div>
-            <div className="text-center p-3 bg-white/60 rounded-lg border">
-              <Database className="h-5 w-5 mx-auto text-amber-500 mb-1" />
-              <div className="text-lg font-bold text-gray-800">
-                {formatBytes(systemStats?.storage?.database || 0)}
-              </div>
-              <div className="text-xs text-gray-500">Database</div>
             </div>
             <div className="text-center p-3 bg-white/60 rounded-lg border border-2 border-gray-300">
               <HardDrive className="h-5 w-5 mx-auto text-gray-600 mb-1" />
@@ -114,7 +96,7 @@ export function AdminOverview({ onNavigate }: AdminOverviewProps) {
               <div>
                 <p className="text-sm font-medium text-amber-800">No local images found</p>
                 <p className="text-xs text-amber-600 mt-1">
-                  Your screenshots are stored on the VPS. Run a new scrape locally to generate images, or use the deploy script to sync from VPS.
+                  This is expected if you run the scraper on the VPS. The gallery always loads images from the VPS asset domain.
                 </p>
               </div>
             </div>
@@ -160,7 +142,7 @@ export function AdminOverview({ onNavigate }: AdminOverviewProps) {
           </div>
         </Card>
 
-        <Card className="p-4 cursor-pointer hover:shadow-md transition-shadow" onClick={() => onNavigate('storage')}>
+        <Card className="p-4 cursor-pointer hover:shadow-md transition-shadow" onClick={() => onNavigate('system')}>
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm text-gray-600">Storage Used</p>
@@ -170,76 +152,6 @@ export function AdminOverview({ onNavigate }: AdminOverviewProps) {
           </div>
         </Card>
       </div>
-
-      {/* Thumbnail Queue Card */}
-      <Card className="p-4">
-        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold flex items-center gap-2">
-              <ImageIcon className="h-5 w-5 text-purple-500" />
-              Thumbnail Queue
-            </h2>
-            <p className="text-sm text-gray-500">Screenshots run in the background so you can queue multiple updates at once.</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <Loader2 className={`h-4 w-4 ${thumbnailQueueCounts.running > 0 ? 'animate-spin text-blue-500' : 'text-gray-300'}`} />
-              <span>{thumbnailQueueCounts.running} running</span>
-            </div>
-            <Badge variant="outline" className="text-xs">Pending {thumbnailQueueCounts.pending}</Badge>
-            <Badge variant="outline" className="text-xs">Completed {thumbnailQueueCounts.completed}</Badge>
-            <Badge variant="destructive" className="text-xs">Failed {thumbnailQueueCounts.failed}</Badge>
-            <Button size="sm" variant="outline" onClick={() => fetchThumbnailJobs({ emitNotifications: false })}>
-              Refresh
-            </Button>
-          </div>
-        </div>
-        <div className="mt-4 space-y-2">
-          {thumbnailJobs.length === 0 ? (
-            <p className="text-sm text-gray-500">No thumbnail jobs queued right now.</p>
-          ) : (
-            thumbnailJobs.slice(0, 5).map((job) => {
-              const statusLabel = job.status === 'completed'
-                ? 'Completed'
-                : job.status === 'failed'
-                  ? 'Failed'
-                  : job.status === 'running'
-                    ? 'Processing'
-                    : 'Queued';
-              const statusStyles = job.status === 'completed'
-                ? 'bg-green-50 text-green-700 border-green-200'
-                : job.status === 'failed'
-                  ? 'bg-red-50 text-red-700 border-red-200'
-                  : job.status === 'running'
-                    ? 'bg-blue-50 text-blue-700 border-blue-200'
-                    : 'bg-amber-50 text-amber-700 border-amber-200';
-              return (
-                <div key={job.id} className="flex items-start justify-between gap-3 border rounded-lg p-3 bg-white">
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-sm truncate">{job.template_name}</p>
-                    <p className="text-xs text-gray-500 truncate">{job.target_url}</p>
-                    {job.status === 'failed' && job.error_message && (
-                      <p className="text-xs text-red-600 mt-1 truncate">{job.error_message}</p>
-                    )}
-                  </div>
-                  <Badge variant="outline" className={`text-xs font-medium whitespace-nowrap ${statusStyles}`}>
-                    {statusLabel}
-                  </Badge>
-                </div>
-              );
-            })
-          )}
-        </div>
-        {thumbnailJobs.length > 5 && (
-          <Button
-            variant="ghost"
-            className="w-full mt-2 text-sm"
-            onClick={() => onNavigate('images')}
-          >
-            View all {thumbnailJobs.length} jobs
-          </Button>
-        )}
-      </Card>
 
       {/* Quick Actions */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -267,28 +179,26 @@ export function AdminOverview({ onNavigate }: AdminOverviewProps) {
 
         <Card
           className="p-4 cursor-pointer hover:shadow-md transition-shadow hover:border-amber-200"
-          onClick={() => onNavigate('images')}
+          onClick={() => onNavigate('screenshots')}
         >
           <div className="text-center">
-            <ImageIcon className="h-8 w-8 mx-auto text-amber-500 mb-2" />
-            <p className="font-medium text-sm">Manage Images</p>
-            <p className="text-xs text-gray-500 mt-1">Fix missing screenshots</p>
+            <Camera className="h-8 w-8 mx-auto text-amber-500 mb-2" />
+            <p className="font-medium text-sm">Screenshots</p>
+            <p className="text-xs text-gray-500 mt-1">Test + exclusions</p>
           </div>
         </Card>
 
         <Card
           className="p-4 cursor-pointer hover:shadow-md transition-shadow hover:border-green-200"
-          onClick={() => onNavigate('storage')}
+          onClick={() => onNavigate('supabase-explorer')}
         >
           <div className="text-center">
-            <HardDrive className="h-8 w-8 mx-auto text-green-500 mb-2" />
-            <p className="font-medium text-sm">Data Transfer</p>
-            <p className="text-xs text-gray-500 mt-1">Export or import data</p>
+            <Database className="h-8 w-8 mx-auto text-green-500 mb-2" />
+            <p className="font-medium text-sm">Supabase Explorer</p>
+            <p className="text-xs text-gray-500 mt-1">Inspect database tables</p>
           </div>
         </Card>
       </div>
     </div>
   );
 }
-
-import { Sparkles } from 'lucide-react';

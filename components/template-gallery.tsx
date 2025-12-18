@@ -14,6 +14,7 @@ import Image from 'next/image';
 import { useInView } from '@/hooks/useInView';
 import TemplatePreview from './template-preview';
 import type { Template } from '@/types/template';
+import { toAssetUrl } from '@/lib/assets';
 
 interface TemplateCardProps {
   template: Template;
@@ -75,17 +76,18 @@ function TemplateCard({ template, onSelect, onPreview }: TemplateCardProps) {
     >
       <Card className="overflow-hidden group hover:shadow-xl transition-all duration-300 p-0">
         <div
-          className="relative aspect-square overflow-hidden bg-gray-100"
+          className="relative aspect-[16/10] overflow-hidden bg-gray-100"
           onMouseEnter={() => setIsHovered(true)}
           onMouseLeave={() => setIsHovered(false)}
         >
-          {template.screenshot_path ? (
+          {template.screenshot_path && toAssetUrl(template.screenshot_path) ? (
             <div ref={scrollRef} className="w-full">
               <Image
-                src={template.screenshot_path}
+                src={toAssetUrl(template.screenshot_path)!}
                 alt={template.name}
-                width={500}
+                width={800}
                 height={500}
+                sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
                 className="w-full h-auto"
               />
             </div>
@@ -191,7 +193,6 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     price: template.price,
     short_description: template.short_description,
     screenshot_path: template.screenshot_path,
-    screenshot_thumbnail_path: template.screenshot_thumbnail_path,
     subcategories: Array.isArray(template.subcategories) ? template.subcategories : [],
     styles: Array.isArray(template.styles) ? template.styles : [],
     is_featured_author: template.is_featured_author,

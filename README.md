@@ -9,13 +9,13 @@ A comprehensive NextJS application for Luminous Web Design Agency featuring a We
 - 🔍 Real-time search and filtering by subcategories
 - 👁️ Live preview modal with desktop/mobile views
 - 🎯 Featured authors section
-- 🖼️ Auto-scrolling thumbnails on hover
+- 🖼️ Auto-scrolling previews on hover
 - ⚡ Optimized performance with infinite scroll
 
 ### Webflow Template Scraper
 - 🤖 Automated scraping from Webflow's sitemap
 - 📸 Full-page screenshots with animation handling
-- 💾 SQLite database for modular storage
+- 🗄️ Supabase Postgres for template metadata
 - 🔄 Concurrent scraping with configurable speed
 - 📊 Progress tracking and error handling
 - 🖼️ WebP image optimization for storage efficiency
@@ -39,7 +39,7 @@ A comprehensive NextJS application for Luminous Web Design Agency featuring a We
 ## Tech Stack
 
 - **Frontend:** Next.js 14, TypeScript, Tailwind CSS, shadcn/ui
-- **Backend:** Next.js API Routes, SQLite
+- **Backend:** Next.js API Routes, Supabase (Postgres)
 - **Scraping:** Playwright
 - **Animations:** Framer Motion
 - **Image Processing:** Sharp
@@ -67,8 +67,10 @@ npx playwright install chromium
 4. Configure environment variables:
 Copy `.env.local` and update:
 ```env
-# Database
-DATABASE_PATH=./data/webflow.db
+# Supabase
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 
 # Resend API Key (get from https://resend.com)
 RESEND_API_KEY=your_resend_api_key_here
@@ -80,9 +82,12 @@ STRIPE_SECRET_KEY=your_stripe_secret_key_here
 # App URL
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 
+# Where screenshots are served from (VPS)
+# This is used even in localhost so images always come from the single source of truth.
+NEXT_PUBLIC_ASSET_BASE_URL=https://templates.luminardigital.com
+
 # Admin Password (change this!)
 ADMIN_PASSWORD=your_secure_admin_password_here
-NEXT_PUBLIC_ADMIN_PASSWORD=your_secure_admin_password_here
 
 # Email Settings
 ADMIN_EMAIL=developer.luminous@gmail.com
@@ -93,9 +98,9 @@ SCRAPER_TIMEOUT=30000
 SCREENSHOT_QUALITY=85
 ```
 
-5. Create required directories:
+5. Create required directories (only needed if you run the scraper locally):
 ```bash
-mkdir -p data public/screenshots public/thumbnails
+mkdir -p public/screenshots
 ```
 
 ## Usage
@@ -127,14 +132,13 @@ Use the password configured in your `.env.local` file.
    - Select authors to feature in the gallery
 
 3. **Monitor Progress:**
-   - Watch the console output for real-time scraping progress
-   - Check storage usage in the "Storage" tab
+   - Use the Fresh Scraper section for progress, logs, and current batch status
 
-### Scraping Options
+### Scraper Modes (Admin)
 
-- **Full Scrape:** Scrapes all templates from Webflow's sitemap
-- **Update New:** Only scrapes templates not in the database
-- **Single URL:** Scrape a specific template by URL
+- **Find updates (incremental):** scrape missing/updated templates from the Webflow sitemap
+- **Start from fresh (destructive):** wipe Supabase template data + wipe screenshots, then re-scrape everything
+- **Re-screenshot all (non-destructive):** regenerate screenshots for all existing Supabase templates without deleting metadata
 
 ### Performance Optimization
 
@@ -146,23 +150,19 @@ Use the password configured in your `.env.local` file.
 
 - `GET /api/templates` - Fetch templates with pagination
 - `GET /api/subcategories` - Get all subcategories
+- `GET /api/styles` - Get all styles
 - `GET /api/admin/stats` - Admin statistics
-- `POST /api/admin/scrape` - Start scraping job
+- `POST /api/admin/fresh-scrape` - Start/update scraper state (admin)
+- `POST /api/admin/fresh-scrape/execute` - Execute scraper batches (admin)
 - `GET /api/admin/featured-authors` - Manage featured authors
 - `POST /api/calculate-pricing` - Calculate website migration cost
 - `POST /api/send-inquiry` - Send email for large sites
 
-## Database Schema
+## Data & Storage
 
-The SQLite database includes:
-- `templates` - Template metadata and paths
-- `subcategories` - Template categories
-- `styles` - Design styles
-- `features` - Template features
-- `featured_authors` - Featured template authors
-- `scrape_jobs` - Scraping job history
-- `visitors` - Visitor tracking
-- `purchases` - Purchase records
+- Template metadata lives in **Supabase**.
+- Template screenshots live on the **VPS filesystem** and are served from `https://templates.luminardigital.com/screenshots/...`.
+- The UI loads screenshots via `NEXT_PUBLIC_ASSET_BASE_URL` even on localhost.
 
 ## Deployment
 
@@ -172,12 +172,10 @@ The SQLite database includes:
 npm run build
 ```
 
-### Database Migration
+### VPS mount (production)
 
-The SQLite database file (`./data/webflow.db`) is portable. You can:
-1. Run the scraper on a development machine
-2. Copy the database file to production
-3. Copy the screenshots folder to production
+Ensure your container has a persistent mount:
+- `/data/webflow-gallery/screenshots` → `/app/public/screenshots`
 
 ### Environment Variables
 
@@ -190,14 +188,7 @@ Ensure all production environment variables are set:
 
 ### Update Templates
 
-Run periodic "Update New" scrapes to fetch new templates.
-
-### Database Backup
-
-Regularly backup the SQLite database:
-```bash
-cp ./data/webflow.db ./data/backup-$(date +%Y%m%d).db
-```
+Run periodic “Find updates” scrapes to fetch new/updated templates.
 
 ### Storage Management
 
@@ -211,15 +202,18 @@ Monitor storage usage in the admin dashboard and clean old screenshots if needed
 - Verify Playwright is installed: `npx playwright install`
 - Adjust timeout settings if templates fail to load
 
-### Database Errors
+### Supabase Errors
 
-- Ensure `./data` directory exists with write permissions
-- Check SQLite is properly installed
+- Verify `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` are set correctly.
 
 ### Image Loading
 
 - Verify Next.js image domains in `next.config.ts`
-- Check screenshot directories exist and have write permissions
+- Verify `NEXT_PUBLIC_ASSET_BASE_URL` points at the VPS domain
+
+## More documentation
+
+- See `knowledge-base/12-18-25-architecture.md` for the canonical architecture and runbook.
 
 ## Future Enhancements
 

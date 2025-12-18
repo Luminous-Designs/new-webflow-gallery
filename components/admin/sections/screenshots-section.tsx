@@ -38,7 +38,6 @@ interface ScreenshotExclusion {
 interface ScreenshotTestResult {
   success: boolean;
   screenshotBase64?: string;
-  thumbnailBase64?: string;
   dimensions?: { width: number; height: number };
   timings?: { total: number; navigation: number; preparation: number; capture: number; processing: number };
   exclusionsApplied?: string[];
@@ -405,22 +404,12 @@ export function ScreenshotsSection() {
             </div>
 
             {screenshotTestResult.success && (
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <h4 className="text-sm font-medium mb-2 text-gray-700">Thumbnail Preview</h4>
-                  <div className="border rounded-lg overflow-hidden bg-gray-100">
-                    {screenshotTestResult.thumbnailBase64 && (
-                      <img src={screenshotTestResult.thumbnailBase64} alt="Thumbnail preview" className="w-full h-auto" />
-                    )}
-                  </div>
-                </div>
-                <div>
-                  <h4 className="text-sm font-medium mb-2 text-gray-700">Full Screenshot</h4>
-                  <div className="border rounded-lg overflow-hidden bg-gray-100 max-h-[300px] overflow-y-auto">
-                    {screenshotTestResult.screenshotBase64 && (
-                      <img src={screenshotTestResult.screenshotBase64} alt="Full screenshot preview" className="w-full h-auto" />
-                    )}
-                  </div>
+              <div>
+                <h4 className="text-sm font-medium mb-2 text-gray-700">Screenshot Preview</h4>
+                <div className="border rounded-lg overflow-hidden bg-gray-100 max-h-[420px] overflow-y-auto">
+                  {screenshotTestResult.screenshotBase64 && (
+                    <img src={screenshotTestResult.screenshotBase64} alt="Screenshot preview" className="w-full h-auto" />
+                  )}
                 </div>
               </div>
             )}

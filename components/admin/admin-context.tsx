@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 'use client';
 
-import React, { createContext, useContext, useState, useCallback, useRef, useEffect, type ReactNode } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import { toast } from 'sonner';
 
 // Types
@@ -56,41 +56,14 @@ export interface SystemStats {
   };
   storage: {
     screenshots: number;
-    thumbnails: number;
-    database: number;
     total: number;
     screenshotCount: number;
-    thumbnailCount: number;
   };
   recommendations: {
     maxConcurrency: number;
     suggestedBrowsers: number;
     suggestedPagesPerBrowser: number;
   };
-}
-
-export interface ThumbnailJobSummary {
-  id: number;
-  template_id: number;
-  template_name: string;
-  template_slug: string;
-  target_url: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  attempts: number;
-  error_message?: string | null;
-  screenshot_path?: string | null;
-  screenshot_thumbnail_path?: string | null;
-  created_at: string;
-  started_at?: string | null;
-  completed_at?: string | null;
-  requested_by?: string | null;
-}
-
-export interface ThumbnailQueueCounts {
-  pending: number;
-  running: number;
-  completed: number;
-  failed: number;
 }
 
 interface AdminContextType {
@@ -123,13 +96,6 @@ interface AdminContextType {
   setUltraFeaturedTemplates: React.Dispatch<React.SetStateAction<any[]>>;
   setUltraPool: React.Dispatch<React.SetStateAction<any[]>>;
   persistUltraFeatured: (templates: any[], successMessage?: string) => Promise<void>;
-
-  // Thumbnail Jobs
-  thumbnailJobs: ThumbnailJobSummary[];
-  thumbnailQueueCounts: ThumbnailQueueCounts;
-  fetchThumbnailJobs: (options?: { emitNotifications?: boolean }, tokenOverride?: string) => Promise<boolean>;
-  queueThumbnailJob: (templateId: number, targetUrl: string, options?: { successMessage?: string; suppressSuccessToast?: boolean }) => Promise<boolean>;
-  pendingThumbnailMap: Map<number, { status: ThumbnailJobSummary['status']; jobId: number; error?: string | null }>;
 
   // Utilities
   withCacheBust: (url?: string, version?: number) => string;
@@ -171,9 +137,6 @@ export function AdminProvider({ children }: AdminProviderProps) {
   const [ultraFeaturedTemplates, setUltraFeaturedTemplates] = useState<any[]>([]);
   const [isUltraLoading, setIsUltraLoading] = useState(false);
   const [isUltraSaving, setIsUltraSaving] = useState(false);
-  const [thumbnailJobs, setThumbnailJobs] = useState<ThumbnailJobSummary[]>([]);
-  const [thumbnailQueueCounts, setThumbnailQueueCounts] = useState<ThumbnailQueueCounts>({ pending: 0, running: 0, completed: 0, failed: 0 });
-  const jobStatusRef = useRef<Map<number, ThumbnailJobSummary['status']>>(new Map());
 
   const withCacheBust = useCallback((url?: string, version?: number) => {
     if (!url) return '';
@@ -184,17 +147,6 @@ export function AdminProvider({ children }: AdminProviderProps) {
   const resolveAuthToken = useCallback(() => {
     return password || localStorage.getItem('admin_auth') || '';
   }, [password]);
-
-  const pendingThumbnailMap = React.useMemo(() => {
-    const map = new Map<number, { status: ThumbnailJobSummary['status']; jobId: number; error?: string | null }>();
-    for (const job of thumbnailJobs) {
-      if (map.has(job.template_id)) continue;
-      if (job.status !== 'completed') {
-        map.set(job.template_id, { status: job.status, jobId: job.id, error: job.error_message });
-      }
-    }
-    return map;
-  }, [thumbnailJobs]);
 
   // Load stats
   const loadStats = useCallback(async (tokenOverride?: string) => {
@@ -358,96 +310,6 @@ export function AdminProvider({ children }: AdminProviderProps) {
     }
   }, [resolveAuthToken, loadUltraFeatured]);
 
-  // Fetch thumbnail jobs
-  const fetchThumbnailJobs = useCallback(async (
-    options: { emitNotifications?: boolean } = {},
-    tokenOverride?: string
-  ) => {
-    const { emitNotifications = false } = options;
-    const token = tokenOverride ?? resolveAuthToken();
-    if (!token) return false;
-
-    try {
-      const response = await fetch('/api/admin/thumbnail-jobs', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (!response.ok) return false;
-
-      const data = await response.json();
-      const jobs: ThumbnailJobSummary[] = Array.isArray(data.jobs) ? data.jobs : [];
-      setThumbnailJobs(jobs);
-
-      const counts: ThumbnailQueueCounts = {
-        pending: data.counts?.pending ?? data.pending ?? 0,
-        running: data.counts?.running ?? data.running ?? 0,
-        completed: data.counts?.completed ?? data.completed ?? 0,
-        failed: data.counts?.failed ?? data.failed ?? 0
-      };
-      setThumbnailQueueCounts(counts);
-
-      const currentIds = new Set<number>();
-      let shouldRefreshFeatured = false;
-      const failureMessages: string[] = [];
-
-      for (const job of jobs) {
-        currentIds.add(job.id);
-        const previousStatus = jobStatusRef.current.get(job.id);
-        if (previousStatus !== job.status) {
-          jobStatusRef.current.set(job.id, job.status);
-          if (job.status === 'completed') {
-            shouldRefreshFeatured = true;
-            if (emitNotifications) toast.success(`Thumbnail updated for ${job.template_name}`);
-          }
-          if (job.status === 'failed') {
-            const message = job.error_message
-              ? `${job.template_name}: ${job.error_message}`
-              : `${job.template_name}: Failed to generate thumbnail`;
-            failureMessages.push(message);
-          }
-        }
-      }
-
-      jobStatusRef.current.forEach((_, id) => {
-        if (!currentIds.has(id)) jobStatusRef.current.delete(id);
-      });
-
-      if (shouldRefreshFeatured) await loadUltraFeatured();
-      failureMessages.slice(0, 3).forEach((message) => toast.error(`Thumbnail job failed – ${message}`));
-      return true;
-    } catch (error) {
-      console.error('Failed to fetch thumbnail jobs:', error);
-      return false;
-    }
-  }, [resolveAuthToken, loadUltraFeatured]);
-
-  // Queue thumbnail job
-  const queueThumbnailJob = useCallback(async (
-    templateId: number,
-    targetUrl: string,
-    options: { successMessage?: string; suppressSuccessToast?: boolean } = {}
-  ) => {
-    try {
-      const response = await fetch(`/api/admin/templates/${templateId}/thumbnail`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${resolveAuthToken()}`
-        },
-        body: JSON.stringify({ targetUrl })
-      });
-
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(payload?.error || 'Thumbnail job could not be queued');
-      if (!options.suppressSuccessToast) toast.success(options.successMessage || 'Screenshot queued in background');
-      await fetchThumbnailJobs({ emitNotifications: false });
-      return true;
-    } catch (error) {
-      console.error('Thumbnail queue error:', error);
-      toast.error(error instanceof Error ? error.message : 'Failed to queue thumbnail');
-      return false;
-    }
-  }, [resolveAuthToken, fetchThumbnailJobs]);
-
   // Authentication
   const authenticate = useCallback(async () => {
     const token = password.trim();
@@ -474,18 +336,14 @@ export function AdminProvider({ children }: AdminProviderProps) {
       loadSystemStats(token),
       loadFeaturedAuthors(token),
       loadUltraFeatured(token),
-      fetchThumbnailJobs({ emitNotifications: false }, token),
     ]);
 
     toast.success('Authenticated');
-  }, [password, loadStats, loadSystemStats, loadFeaturedAuthors, loadUltraFeatured, fetchThumbnailJobs]);
+  }, [password, loadStats, loadSystemStats, loadFeaturedAuthors, loadUltraFeatured]);
 
   const logout = useCallback(() => {
     localStorage.removeItem('admin_auth');
     setIsAuthenticated(false);
-    setThumbnailJobs([]);
-    setThumbnailQueueCounts({ pending: 0, running: 0, completed: 0, failed: 0 });
-    jobStatusRef.current.clear();
   }, []);
 
   // Auto-login on mount
@@ -515,13 +373,12 @@ export function AdminProvider({ children }: AdminProviderProps) {
         loadFeaturedAuthors(savedAuth),
         loadSystemStats(savedAuth),
         loadUltraFeatured(savedAuth),
-        fetchThumbnailJobs({ emitNotifications: false }, savedAuth),
       ]);
     };
 
     attemptAutoLogin();
     return () => { cancelled = true; };
-  }, [loadStats, loadFeaturedAuthors, loadSystemStats, loadUltraFeatured, fetchThumbnailJobs]);
+  }, [loadStats, loadFeaturedAuthors, loadSystemStats, loadUltraFeatured]);
 
   // Auto-refresh stats
   useEffect(() => {
@@ -532,20 +389,6 @@ export function AdminProvider({ children }: AdminProviderProps) {
     }, 30000);
     return () => clearInterval(interval);
   }, [isAuthenticated, loadStats, loadSystemStats]);
-
-  // Auto-refresh thumbnail jobs
-  useEffect(() => {
-    if (!isAuthenticated) {
-      jobStatusRef.current.clear();
-      setThumbnailJobs([]);
-      setThumbnailQueueCounts({ pending: 0, running: 0, completed: 0, failed: 0 });
-      return;
-    }
-
-    fetchThumbnailJobs();
-    const interval = setInterval(() => fetchThumbnailJobs(), 5000);
-    return () => clearInterval(interval);
-  }, [isAuthenticated, fetchThumbnailJobs]);
 
   const value: AdminContextType = {
     isAuthenticated,
@@ -570,11 +413,6 @@ export function AdminProvider({ children }: AdminProviderProps) {
     setUltraFeaturedTemplates,
     setUltraPool,
     persistUltraFeatured,
-    thumbnailJobs,
-    thumbnailQueueCounts,
-    fetchThumbnailJobs,
-    queueThumbnailJob,
-    pendingThumbnailMap,
     withCacheBust,
     formatBytes,
   };

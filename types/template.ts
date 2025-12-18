@@ -11,7 +11,6 @@ export interface Template {
   price?: string;
   short_description?: string;
   screenshot_path?: string;
-  screenshot_thumbnail_path?: string;
   subcategories: string[];
   styles: string[];
   is_featured_author?: boolean;

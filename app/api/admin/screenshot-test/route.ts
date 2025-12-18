@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { chromium, type BrowserContext, type Page } from 'playwright';
 import sharp from 'sharp';
 import { preparePageForScreenshot } from '@/lib/screenshot/prepare';
-import { getActiveScreenshotExclusions } from '@/lib/db';
+import { getActiveScreenshotExclusions } from '@/lib/supabase';
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
@@ -18,7 +18,6 @@ function isAuthorized(request: NextRequest): boolean {
 interface TestScreenshotResult {
   success: boolean;
   screenshotBase64?: string;
-  thumbnailBase64?: string;
   dimensions?: { width: number; height: number };
   timings?: {
     total: number;
@@ -153,23 +152,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<TestScree
       height: metadata.height || 0,
     };
 
-    // Create thumbnail
-    const thumbnail = await sharp(screenshotBuffer)
-      .resize(500, 500, { fit: 'cover', position: 'top' })
-      .webp({ quality: Math.max(10, screenshotQuality - 10) })
-      .toBuffer();
-
     timings.processing = Date.now() - processStart;
     timings.total = Date.now() - startTime;
 
     // Convert to base64 for response
     const screenshotBase64 = `data:image/webp;base64,${fullScreenshot.toString('base64')}`;
-    const thumbnailBase64 = `data:image/webp;base64,${thumbnail.toString('base64')}`;
 
     return NextResponse.json({
       success: true,
       screenshotBase64,
-      thumbnailBase64,
       dimensions,
       timings,
       exclusionsApplied: exclusions,

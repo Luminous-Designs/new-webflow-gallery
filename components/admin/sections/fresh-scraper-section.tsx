@@ -10,6 +10,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Slider } from '@/components/ui/slider';
 import { useAdmin } from '../admin-context';
 import { toast } from 'sonner';
+import { toAssetUrl } from '@/lib/assets';
 import {
   AlertTriangle,
   Trash2,
@@ -34,7 +35,6 @@ import {
   Settings2,
   Cpu,
   FileSearch,
-  Download,
   AlertCircle,
   StopCircle,
   CheckCircle,
@@ -86,7 +86,6 @@ interface FreshScrapeConfig {
   screenshotStabilityCheckIntervalMs: number;
   screenshotJpegQuality: number;
   screenshotWebpQuality: number;
-  thumbnailWebpQuality: number;
 }
 
 interface TemplatePhase {
@@ -117,7 +116,6 @@ interface Screenshot {
   id: number;
   name: string | null;
   slug: string | null;
-  thumbnailPath: string | null;
   screenshotPath: string | null;
   isFeaturedAuthor: boolean;
   capturedAt: string;
@@ -164,21 +162,6 @@ interface RealTimeState {
   semaphoreWaiting: number;
 }
 
-// Scrape state from persistent storage
-interface PersistentScrapeState {
-  status: 'idle' | 'running' | 'paused' | 'timeout_paused' | 'stopped' | 'completed';
-  totalUrls: number;
-  processedUrls: number;
-  successfulUrls: number;
-  failedUrls: number;
-  timeoutCount: number;
-  consecutiveTimeouts: number;
-  pausedUrls: string[];
-  remainingUrls: string[];
-  startedAt: string | null;
-  pausedAt: string | null;
-}
-
 interface NewTemplateDiscoveryState {
   phase: 'idle' | 'checking' | 'checked' | 'error';
   totalInSitemap: number;
@@ -201,7 +184,7 @@ function PhaseIcon({ phase }: { phase: string }) {
       return <FileSearch className="h-4 w-4 text-blue-500 animate-pulse" />;
     case 'taking_screenshot':
       return <Camera className="h-4 w-4 text-purple-500 animate-pulse" />;
-    case 'processing_thumbnail':
+    case 'processing_screenshot':
       return <ImageIcon className="h-4 w-4 text-orange-500 animate-pulse" />;
     case 'saving':
       return <Database className="h-4 w-4 text-green-500 animate-pulse" />;
@@ -220,7 +203,7 @@ function formatPhase(phase: string): string {
     loading: 'Loading Page',
     scraping_details: 'Extracting Data',
     taking_screenshot: 'Screenshotting',
-    processing_thumbnail: 'Processing',
+    processing_screenshot: 'Processing',
     saving: 'Saving',
     completed: 'Done',
     failed: 'Failed'
@@ -546,24 +529,6 @@ function PerformanceControls({
 	            <div className="text-xs text-gray-400">Default: 75</div>
 	          </div>
 
-	          <div className="space-y-2">
-	            <div className="flex items-center justify-between">
-	              <span className="text-sm font-medium text-gray-700">Thumbnail WebP quality</span>
-	              <Badge variant="secondary" className="bg-slate-100 text-slate-700">
-	                {config.thumbnailWebpQuality}
-	              </Badge>
-	            </div>
-	            <Slider
-	              value={[config.thumbnailWebpQuality]}
-	              onValueChange={([value]) => onChange({ thumbnailWebpQuality: value })}
-	              min={30}
-	              max={90}
-	              step={5}
-	              disabled={disabled}
-	              className="cursor-pointer"
-	            />
-	            <div className="text-xs text-gray-400">Default: 60</div>
-	          </div>
 	        </div>
 
 	        {/* Resource Usage Indicator */}
@@ -871,9 +836,9 @@ function LazyScreenshotCarousel({
             >
               <div className="relative rounded-xl overflow-hidden shadow-lg hover:shadow-xl transition-shadow">
                 <div className="relative w-64 aspect-[16/10] bg-gray-100">
-                  {screenshot.screenshotPath || screenshot.thumbnailPath ? (
+                  {toAssetUrl(screenshot.screenshotPath || null) ? (
                     <Image
-                      src={(screenshot.screenshotPath || screenshot.thumbnailPath)!}
+                      src={toAssetUrl(screenshot.screenshotPath || null)!}
                       alt={screenshot.name || screenshot.slug || 'Screenshot'}
                       fill
                       className="object-contain object-top"
@@ -938,8 +903,6 @@ function SpeedIndicator({
 }) {
   const maxSpeed = Math.max(...speedHistory, currentSpeed, 1);
   const graphHeight = 60;
-  const graphWidth = 200;
-  const barWidth = Math.floor(graphWidth / Math.max(speedHistory.length, 1));
   const remaining = totalCount && totalProcessed !== undefined
     ? Math.max(totalCount - totalProcessed, 0)
     : null;
@@ -1302,7 +1265,6 @@ export function FreshScraperSection() {
   const [scrapeState, setScrapeState] = useState<FreshScrapeState | null>(null);
   const [pausedState, setPausedState] = useState<FreshScrapeState | null>(null);
   const [pausedLastScreenshot, setPausedLastScreenshot] = useState<LastScreenshotInfo | null>(null);
-  const [activeLastScreenshot, setActiveLastScreenshot] = useState<LastScreenshotInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 	  const [config, setConfig] = useState<FreshScrapeConfig>({
 	    concurrency: 5,
@@ -1318,8 +1280,7 @@ export function FreshScraperSection() {
 	    screenshotStabilityMaxWaitMs: 7000,
 	    screenshotStabilityCheckIntervalMs: 250,
 	    screenshotJpegQuality: 80,
-	    screenshotWebpQuality: 75,
-	    thumbnailWebpQuality: 60
+	    screenshotWebpQuality: 75
 	  });
   const [currentBatch, setCurrentBatch] = useState<TemplatePhase[]>([]);
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
@@ -1389,7 +1350,6 @@ export function FreshScraperSection() {
             setPausedState(data.pausedState);
           }
           setPausedLastScreenshot(data.pausedLastScreenshot || null);
-          setActiveLastScreenshot(data.activeLastScreenshot || null);
         }
       } catch (error) {
         console.error('Failed to fetch status:', error);
@@ -1408,8 +1368,7 @@ export function FreshScraperSection() {
     id: row.id,
     name: row.template_name,
     slug: row.template_slug,
-    thumbnailPath: row.screenshot_thumbnail_path,
-    screenshotPath: row.screenshot_path ?? (row.template_slug ? `/screenshots/${row.template_slug}.webp` : null),
+    screenshotPath: row.screenshot_path ?? row.screenshot_thumbnail_path ?? (row.template_slug ? `/screenshots/${row.template_slug}.webp` : null),
     isFeaturedAuthor: !!row.is_featured_author,
     capturedAt: row.captured_at
   });
@@ -1664,6 +1623,85 @@ export function FreshScraperSection() {
     }
   };
 
+  const startRescreenshotAll = async (options?: { wipeImages?: boolean }) => {
+    const wipeImages = options?.wipeImages !== false;
+
+    if (wipeImages) {
+      const confirmText = window.prompt(
+        'This will delete ALL files in public/screenshots on the running server before re-capturing screenshots.\n\nType WIPE_SCREENSHOTS to confirm.'
+      );
+      if (confirmText !== 'WIPE_SCREENSHOTS') return;
+    } else {
+      if (!window.confirm('Re-capture screenshots for all templates without deleting existing files first?')) return;
+    }
+
+    try {
+      const response = await fetch('/api/admin/fresh-scrape', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${resolveAuthToken()}`
+        },
+        body: JSON.stringify({
+          action: 'start_rescreenshot_all',
+          wipeImages,
+          confirm: wipeImages ? 'WIPE_SCREENSHOTS' : undefined,
+          config
+        })
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to start rescreenshot-all');
+      }
+
+      const data = await response.json();
+      if (data.state) {
+        setScrapeState(data.state);
+        await executeBatches(data.state);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to start rescreenshot-all';
+      toast.error(message);
+    }
+  };
+
+  const startFreshScrape = async () => {
+    const confirmText = window.prompt(
+      'DANGER: This will delete ALL templates in Supabase (plus related metadata tables) and wipe ALL screenshot files on the running server.\n\nType DELETE_ALL to confirm.'
+    );
+    if (confirmText !== 'DELETE_ALL') return;
+
+    try {
+      const response = await fetch('/api/admin/fresh-scrape', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${resolveAuthToken()}`
+        },
+        body: JSON.stringify({
+          action: 'start_fresh',
+          confirm: 'DELETE_ALL',
+          config
+        })
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to start fresh scrape');
+      }
+
+      const data = await response.json();
+      if (data.state) {
+        setScrapeState(data.state);
+        await executeBatches(data.state);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to start fresh scrape';
+      toast.error(message);
+    }
+  };
+
   // Execute batches
 	  const executeBatches = async (state: FreshScrapeState) => {
 	    setIsExecuting(true);
@@ -1846,7 +1884,7 @@ export function FreshScraperSection() {
       });
 
       toast.success('Scrape paused - can be resumed later');
-    } catch (error) {
+    } catch {
       toast.error('Failed to pause');
     }
   };
@@ -1890,7 +1928,7 @@ export function FreshScraperSection() {
         await executeBatches(nextState);
         toast.success('Scrape resumed');
       }
-    } catch (error) {
+    } catch {
       toast.error('Failed to resume');
     }
   };
@@ -1952,7 +1990,7 @@ export function FreshScraperSection() {
       setRealTimeState(null); // Clear real-time state
       toast.success('Scrape stopped');
       loadStats();
-    } catch (error) {
+    } catch {
       toast.error('Failed to stop');
     }
   };
@@ -1969,7 +2007,7 @@ export function FreshScraperSection() {
         body: JSON.stringify({ action: 'resume_timeout' })
       });
       toast.success('Resuming from timeout pause - URLs will be retried');
-    } catch (error) {
+    } catch {
       toast.error('Failed to resume from timeout');
     }
   };
@@ -2009,8 +2047,7 @@ export function FreshScraperSection() {
 	          'screenshotStabilityMaxWaitMs',
 	          'screenshotStabilityCheckIntervalMs',
 	          'screenshotJpegQuality',
-	          'screenshotWebpQuality',
-	          'thumbnailWebpQuality'
+	          'screenshotWebpQuality'
 	        ];
 	        const hasScreenshotUpdates = screenshotKeys.some(k => updates[k] !== undefined);
 
@@ -2229,11 +2266,11 @@ export function FreshScraperSection() {
               <div className="p-3 bg-amber-100 rounded-xl">
                 <AlertCircle className="h-6 w-6 text-amber-600" />
               </div>
-              {pausedLastScreenshot?.screenshot_thumbnail_path && (
+              {toAssetUrl(pausedLastScreenshot?.screenshot_path || null) && (
                 <div className="relative w-12 h-12 rounded-lg overflow-hidden border border-amber-200 bg-white">
                   <Image
-                    src={pausedLastScreenshot.screenshot_thumbnail_path}
-                    alt={pausedLastScreenshot.template_name || pausedLastScreenshot.template_slug || 'Last template'}
+                    src={toAssetUrl(pausedLastScreenshot?.screenshot_path || null)!}
+                    alt={pausedLastScreenshot?.template_name || pausedLastScreenshot?.template_slug || 'Last template'}
                     fill
                     sizes="48px"
                     className="object-cover"
@@ -2283,7 +2320,7 @@ export function FreshScraperSection() {
               <h1 className="text-2xl font-bold text-gray-900">Incremental Update Scrape</h1>
               <p className="text-sm text-gray-600 mt-1">
                 No destructive deletes. This checks the Webflow sitemap for missing/updated templates and pushes updates into Supabase in batches.
-                Screenshots/thumbnails are saved locally and can be synced to the VPS via rsync.
+                Screenshots are saved to the server filesystem (typically a persistent mount in production) and served from the VPS domain.
               </p>
               <div className="mt-4 flex flex-col sm:flex-row gap-2">
                 <Button variant="outline" onClick={checkForNewTemplates} disabled={newTemplateDiscovery.phase === 'checking'}>
@@ -2313,6 +2350,44 @@ export function FreshScraperSection() {
                   Missing: {newTemplateDiscovery.missingCount} · Updated: {newTemplateDiscovery.updatedCount} · To scrape: {newTemplateDiscovery.toScrapeCount}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      {/* Maintenance / Destructive Operations */}
+      <Card className="p-8 border border-red-200 bg-gradient-to-br from-red-50/40 to-white">
+        <div className="max-w-3xl mx-auto">
+          <div className="flex items-start gap-4">
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-br from-red-500 to-orange-500 shadow-lg shrink-0">
+              <AlertTriangle className="h-7 w-7 text-white" />
+            </div>
+            <div className="flex-1">
+              <h2 className="text-2xl font-bold text-gray-900">Maintenance / Destructive</h2>
+              <p className="text-sm text-gray-600 mt-1">
+                Run these only on the VPS deployment where `public/screenshots` is backed by the persistent mounts.
+              </p>
+              <div className="mt-4 flex flex-col sm:flex-row gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => startRescreenshotAll({ wipeImages: true })}
+                  disabled={isExecuting}
+                >
+                  <Camera className="h-4 w-4 mr-2" />
+                  Wipe images + re-do screenshots
+                </Button>
+                <Button
+                  onClick={startFreshScrape}
+                  disabled={isExecuting}
+                  className="bg-red-600 hover:bg-red-700"
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Start from scratch (delete Supabase + images)
+                </Button>
+              </div>
+              <div className="mt-3 text-xs text-gray-500">
+                Images are always loaded from the VPS domain in both localhost and production; local `public/` images are intentionally ignored.
+              </div>
             </div>
           </div>
         </div>

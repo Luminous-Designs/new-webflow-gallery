@@ -54,6 +54,7 @@ const CHROMIUM_LAUNCH_ARGS = [
 
 // Types
 export interface FreshScraperConfig {
+  jobMode?: 'full' | 'screenshots_only';
   concurrency: number;
   browserInstances: number;
   pagesPerBrowser: number;
@@ -70,7 +71,6 @@ export interface FreshScraperConfig {
   // Screenshot quality controls
   screenshotJpegQuality: number;
   screenshotWebpQuality: number;
-  thumbnailWebpQuality: number;
 }
 
 export const FRESH_SCRAPER_LIMITS = {
@@ -104,6 +104,10 @@ function clampOptionalFloat(value: unknown, min: number, max: number): number | 
 
 export function clampFreshScraperConfig(config: Partial<FreshScraperConfig>): Partial<FreshScraperConfig> {
   const out: Partial<FreshScraperConfig> = {};
+
+  if (config.jobMode === 'full' || config.jobMode === 'screenshots_only') {
+    out.jobMode = config.jobMode;
+  }
 
   const clampedConcurrency = clampOptionalInt(config.concurrency, FRESH_SCRAPER_LIMITS.concurrency.min, FRESH_SCRAPER_LIMITS.concurrency.max);
   if (clampedConcurrency !== undefined) out.concurrency = clampedConcurrency;
@@ -147,9 +151,6 @@ export function clampFreshScraperConfig(config: Partial<FreshScraperConfig>): Pa
   const clampedWebp = clampOptionalInt(config.screenshotWebpQuality, FRESH_SCRAPER_LIMITS.screenshotQuality.min, FRESH_SCRAPER_LIMITS.screenshotQuality.max);
   if (clampedWebp !== undefined) out.screenshotWebpQuality = clampedWebp;
 
-  const clampedThumb = clampOptionalInt(config.thumbnailWebpQuality, FRESH_SCRAPER_LIMITS.screenshotQuality.min, FRESH_SCRAPER_LIMITS.screenshotQuality.max);
-  if (clampedThumb !== undefined) out.thumbnailWebpQuality = clampedThumb;
-
   return out;
 }
 
@@ -157,7 +158,7 @@ export interface TemplatePhase {
   url: string;
   slug: string;
   name: string | null;
-  phase: 'pending' | 'loading' | 'scraping_details' | 'taking_screenshot' | 'processing_thumbnail' | 'saving' | 'completed' | 'failed' | 'timeout_paused';
+  phase: 'pending' | 'loading' | 'scraping_details' | 'taking_screenshot' | 'processing_screenshot' | 'saving' | 'completed' | 'failed' | 'timeout_paused';
   startTime: number;
   error?: string;
 }
@@ -189,12 +190,12 @@ export interface ScrapeState {
 export interface FreshScraperEvents {
   'log': (data: { level: string; message: string }) => void;
   'template-phase': (data: { url: string; phase: string; elapsed: number }) => void;
-  'template-complete': (data: { url: string; name: string; slug: string; success: boolean; thumbnailPath?: string }) => void;
+  'template-complete': (data: { url: string; name: string; slug: string; success: boolean; screenshotPath?: string }) => void;
   'batch-start': (data: { batchIndex: number; batchSize: number; urls: string[] }) => void;
   'batch-complete': (data: { batchIndex: number; processed: number; successful: number; failed: number }) => void;
   'phase-change': (data: { phase: string; message: string }) => void;
   'progress': (data: { processed: number; successful: number; failed: number; total: number }) => void;
-  'screenshot-captured': (data: { name: string; slug: string; thumbnailPath: string; isFeaturedAuthor: boolean }) => void;
+  'screenshot-captured': (data: { name: string; slug: string; screenshotPath: string; isFeaturedAuthor: boolean }) => void;
   'supabase-state': (data: SupabaseWriteSnapshot) => void;
   'error': (data: { message: string; url?: string }) => void;
   'complete': () => void;
@@ -215,6 +216,7 @@ interface BrowserPoolItem {
 interface BrowserScrapeSuccess {
   success: true;
   slug: string;
+  templateRowId?: number;
   data: {
     name: string;
     authorId: string | null;
@@ -307,6 +309,7 @@ const RECENT_OPERATIONS_WINDOW = 10; // Look at last 10 operations for ratio
 
 export class FreshScraper extends EventEmitter {
   private config: FreshScraperConfig;
+  private jobMode: 'full' | 'screenshots_only';
   private browserPool: BrowserPoolItem[] = [];
   private isPaused: boolean = false;
   private isStopped: boolean = false;
@@ -322,6 +325,15 @@ export class FreshScraper extends EventEmitter {
   private screenshotExclusionSelectors: string[] = [];
   private screenshotExclusionsFetchedAt: number = 0;
   private screenshotExclusionsTtlMs: number = 60_000;
+
+  private templateIndex: Map<string, {
+    id: number;
+    name: string | null;
+    live_preview_url: string | null;
+    author_id: string | null;
+    author_name: string | null;
+    author_avatar: string | null;
+  }> = new Map();
 
   // Timeout tracking
   private timeoutCount: number = 0;
@@ -343,6 +355,7 @@ export class FreshScraper extends EventEmitter {
     super();
     const sanitized = clampFreshScraperConfig(config);
     this.config = {
+      jobMode: sanitized.jobMode ?? 'full',
       concurrency: sanitized.concurrency ?? 5,
       browserInstances: sanitized.browserInstances ?? 2,
       pagesPerBrowser: sanitized.pagesPerBrowser ?? 5,
@@ -360,9 +373,9 @@ export class FreshScraper extends EventEmitter {
 
       // Screenshot quality defaults
       screenshotJpegQuality: sanitized.screenshotJpegQuality ?? 80,
-      screenshotWebpQuality: sanitized.screenshotWebpQuality ?? 75,
-      thumbnailWebpQuality: sanitized.thumbnailWebpQuality ?? 60
+      screenshotWebpQuality: sanitized.screenshotWebpQuality ?? 75
     };
+    this.jobMode = this.config.jobMode ?? 'full';
     this.semaphore = new Semaphore(this.config.concurrency);
     this.imageSemaphore = new Semaphore(this.getDesiredImageConcurrency());
     this.supabaseWriter = new SupabaseTemplateBatchWriter({
@@ -393,10 +406,8 @@ export class FreshScraper extends EventEmitter {
   async init(restoreState: boolean = false): Promise<void> {
     // Ensure directories exist
     const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
-    const thumbnailDir = path.join(process.cwd(), 'public', 'thumbnails');
 
     await fs.mkdir(screenshotDir, { recursive: true });
-    await fs.mkdir(thumbnailDir, { recursive: true });
 
     if (restoreState) {
       this.log('warn', 'restoreState requested, but FreshScraper no longer persists local state.');
@@ -419,7 +430,60 @@ export class FreshScraper extends EventEmitter {
     this.timeoutCount = 0;
     this.consecutiveTimeouts = 0;
 
+    if (this.jobMode === 'screenshots_only') {
+      this.templateIndex = await this.loadTemplateIndex();
+      this.log('info', `Loaded ${this.templateIndex.size} templates from Supabase for screenshots-only mode`);
+    } else {
+      this.templateIndex = new Map();
+    }
+
     this.log('info', `Initialized with ${this.featuredAuthorIds.size} featured authors`);
+  }
+
+  private async loadTemplateIndex(): Promise<Map<string, {
+    id: number;
+    name: string | null;
+    live_preview_url: string | null;
+    author_id: string | null;
+    author_name: string | null;
+    author_avatar: string | null;
+  }>> {
+    const index = new Map<string, {
+      id: number;
+      name: string | null;
+      live_preview_url: string | null;
+      author_id: string | null;
+      author_name: string | null;
+      author_avatar: string | null;
+    }>();
+
+    const pageSize = 1000;
+    for (let from = 0; ; from += pageSize) {
+      const { data, error } = await supabaseAdmin
+        .from('templates')
+        .select('id, slug, name, live_preview_url, author_id, author_name, author_avatar')
+        .order('id', { ascending: true })
+        .range(from, from + pageSize - 1);
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+
+      for (const row of data) {
+        const slug = (row.slug as string | null) || null;
+        if (!slug) continue;
+        index.set(slug, {
+          id: row.id as number,
+          name: (row.name as string | null) || null,
+          live_preview_url: (row.live_preview_url as string | null) || null,
+          author_id: (row.author_id as string | null) || null,
+          author_name: (row.author_name as string | null) || null,
+          author_avatar: (row.author_avatar as string | null) || null,
+        });
+      }
+
+      if (data.length < pageSize) break;
+    }
+
+    return index;
   }
 
   private updateState(updates: Partial<ScrapeState>): void {
@@ -673,8 +737,14 @@ export class FreshScraper extends EventEmitter {
     const oldBrowserInstances = this.config.browserInstances;
     const oldConcurrency = this.config.concurrency;
     const oldPagesPerBrowser = this.config.pagesPerBrowser;
+    const oldJobMode = this.jobMode;
 
     this.config = { ...this.config, ...sanitized };
+    this.jobMode = this.config.jobMode ?? this.jobMode;
+
+    if (this.jobMode !== oldJobMode) {
+      this.log('warn', `jobMode changed (${oldJobMode} → ${this.jobMode}). Restart the scrape for this to take full effect.`);
+    }
 
     // Update semaphore if concurrency changed
     if (sanitized.concurrency !== undefined && sanitized.concurrency !== oldConcurrency) {
@@ -1011,14 +1081,14 @@ export class FreshScraper extends EventEmitter {
               name: browserResult.data.name || browserResult.slug,
               slug: browserResult.slug,
               success: true,
-              thumbnailPath: saveResult.thumbnailPath
+              screenshotPath: saveResult.screenshotPath
             });
 
-            if (saveResult.thumbnailPath) {
+            if (saveResult.screenshotPath) {
               this.emit('screenshot-captured', {
                 name: browserResult.data.name || browserResult.slug,
                 slug: browserResult.slug,
-                thumbnailPath: saveResult.thumbnailPath,
+                screenshotPath: saveResult.screenshotPath,
                 isFeaturedAuthor: browserResult.isFeaturedAuthor
               });
             }
@@ -1189,6 +1259,96 @@ export class FreshScraper extends EventEmitter {
     this.updatePhase(batchIndex, 'loading');
 
     try {
+      if (this.jobMode === 'screenshots_only') {
+        const entry = this.templateIndex.get(slug);
+        if (!entry || !entry.live_preview_url) {
+          throw new Error(`Template ${slug} not found in Supabase index (or missing live_preview_url)`);
+        }
+
+        if (this.currentBatch[batchIndex]) {
+          this.currentBatch[batchIndex].name = entry.name || slug;
+        }
+
+        this.updatePhase(batchIndex, 'taking_screenshot');
+        this.log('info', `[screenshots-only] Capturing: ${slug}`);
+
+        const isFeaturedAuthor = entry.author_id ? this.featuredAuthorIds.has(entry.author_id) : false;
+
+        const previewNavResult = await this.navigateWithRetry(page, entry.live_preview_url, 2);
+        if (!previewNavResult.success) {
+          throw new Error(previewNavResult.error || 'Preview navigation failed');
+        }
+
+        const homepageDetection = await detectHomepage(page, entry.live_preview_url);
+        const screenshotUrl = homepageDetection.screenshotUrl;
+        const isAlternateHomepage = homepageDetection.isAlternateHomepage;
+        const alternateHomepagePath = homepageDetection.detectedPath || null;
+
+        if (homepageDetection.isAlternateHomepage) {
+          this.log('info', `[ALTERNATE] Found alternate homepage for ${slug}: ${homepageDetection.detectedPath}`);
+          const altNavResult = await this.navigateWithRetry(page, homepageDetection.screenshotUrl, 2);
+          if (!altNavResult.success) {
+            this.log('warn', `Failed to navigate to alternate homepage: ${altNavResult.error}`);
+          }
+        }
+
+        await preparePageForScreenshot(page, {
+          loadTimeoutMs: this.config.timeout,
+          animationWaitMs: this.config.screenshotAnimationWaitMs,
+          scrollDelayMs: 150,
+          elementsToRemove: screenshotSelectors,
+          enableScroll: false,
+          nudgeScrollRatio: this.config.screenshotNudgeScrollRatio,
+          nudgeWaitMs: this.config.screenshotNudgeWaitMs,
+          nudgeAfterMs: this.config.screenshotNudgeAfterMs,
+          ensureAnimationsSettled: true,
+          stabilityStableMs: this.config.screenshotStabilityStableMs,
+          stabilityMaxWaitMs: this.config.screenshotStabilityMaxWaitMs,
+          stabilityCheckIntervalMs: this.config.screenshotStabilityCheckIntervalMs
+        });
+
+        const screenshotBuffer = await page.screenshot({
+          type: 'jpeg',
+          quality: Math.min(100, Math.max(1, this.config.screenshotJpegQuality)),
+          fullPage: false
+        });
+
+        if (!screenshotBuffer || screenshotBuffer.length === 0) {
+          throw new Error('Screenshot capture returned empty buffer');
+        }
+
+        if (await this.isLikelyBlankScreenshot(screenshotBuffer)) {
+          throw new Error('Screenshot looked blank');
+        }
+
+        return {
+          success: true,
+          slug,
+          templateRowId: entry.id,
+          data: {
+            name: entry.name || slug,
+            authorId: entry.author_id,
+            authorName: entry.author_name,
+            authorAvatar: entry.author_avatar,
+            livePreviewUrl: entry.live_preview_url,
+            designerPreviewUrl: '',
+            price: '',
+            shortDescription: '',
+            longDescription: '',
+            subcategories: [],
+            styles: [],
+            features: [],
+            isCms: false,
+            isEcommerce: false,
+          },
+          isFeaturedAuthor,
+          screenshotBuffer,
+          screenshotUrl,
+          isAlternateHomepage,
+          alternateHomepagePath
+        };
+      }
+
       this.log('info', `Scraping: ${slug}`);
 
       const disableLightweight = await this.enableLightweightMode(page);
@@ -1394,54 +1554,63 @@ export class FreshScraper extends EventEmitter {
     result: BrowserScrapeSuccess,
     storefrontUrl: string,
     batchIndex: number
-  ): Promise<{ thumbnailPath?: string }> {
+  ): Promise<{ screenshotPath?: string }> {
     const { slug, data } = result;
 
     let screenshotPath: string | null = null;
-    let thumbnailPath: string | null = null;
 
     if (result.screenshotBuffer) {
-      this.updatePhase(batchIndex, 'processing_thumbnail');
+      this.updatePhase(batchIndex, 'processing_screenshot');
       await this.imageSemaphore.acquire();
       try {
         const screenshotFilename = `${slug}.webp`;
         screenshotPath = `/screenshots/${screenshotFilename}`;
         const screenshotFullPath = path.join(process.cwd(), 'public', 'screenshots', screenshotFilename);
 
-	        const thumbnailFilename = `${slug}_thumb.webp`;
-	        thumbnailPath = `/thumbnails/${thumbnailFilename}`;
-	        const thumbnailFullPath = path.join(process.cwd(), 'public', 'thumbnails', thumbnailFilename);
-
 	        const screenshotWebpQuality = Math.min(100, Math.max(1, this.config.screenshotWebpQuality));
-	        const thumbnailWebpQuality = Math.min(100, Math.max(1, this.config.thumbnailWebpQuality));
-
-	        await Promise.all([
-	          sharp(result.screenshotBuffer)
-	            .resize(MAX_SCREENSHOT_WIDTH, MAX_SCREENSHOT_HEIGHT, {
-	              withoutEnlargement: true,
-	              fit: 'inside'
-	            })
-	            .webp({ quality: screenshotWebpQuality })
-	            .toFile(screenshotFullPath),
-	          sharp(result.screenshotBuffer)
-	            .resize(500, 500, {
-	              fit: 'cover',
-	              position: 'top'
-	            })
-	            .webp({ quality: thumbnailWebpQuality })
-	            .toFile(thumbnailFullPath)
-	        ]);
+	        await sharp(result.screenshotBuffer)
+	          .resize(MAX_SCREENSHOT_WIDTH, MAX_SCREENSHOT_HEIGHT, {
+	            withoutEnlargement: true,
+	            fit: 'inside'
+	          })
+	          .webp({ quality: screenshotWebpQuality })
+	          .toFile(screenshotFullPath);
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error';
         this.log('warn', `Image processing failed for ${slug}: ${errorMsg}`);
         screenshotPath = null;
-        thumbnailPath = null;
       } finally {
         this.imageSemaphore.release();
       }
     }
 
     this.updatePhase(batchIndex, 'saving');
+
+    if (this.jobMode === 'screenshots_only') {
+      if (!result.templateRowId) {
+        throw new Error('screenshots_only mode requires templateRowId');
+      }
+      if (!screenshotPath) {
+        throw new Error('Screenshot processing failed (no screenshotPath)');
+      }
+
+      await supabaseAdmin
+        .from('templates')
+        .update({
+          screenshot_path: screenshotPath,
+          screenshot_thumbnail_path: null,
+          screenshot_url: result.screenshotUrl,
+          is_alternate_homepage: result.isAlternateHomepage,
+          alternate_homepage_path: result.alternateHomepagePath,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', result.templateRowId);
+
+      this.updatePhase(batchIndex, 'completed');
+      this.log('info', `Completed (screenshots-only): ${slug}`);
+
+      return { screenshotPath };
+    }
 
     const templateId = `wf_${slug}`;
     const now = new Date().toISOString();
@@ -1462,7 +1631,7 @@ export class FreshScraper extends EventEmitter {
         short_description: data.shortDescription || null,
         long_description: data.longDescription || null,
         screenshot_path: screenshotPath,
-        screenshot_thumbnail_path: thumbnailPath,
+        screenshot_thumbnail_path: null,
         is_featured: result.isFeaturedAuthor,
         is_cms: data.isCms,
         is_ecommerce: data.isEcommerce,
@@ -1482,7 +1651,7 @@ export class FreshScraper extends EventEmitter {
     this.updatePhase(batchIndex, 'completed');
     this.log('info', `Completed: ${slug}`);
 
-    return thumbnailPath ? { thumbnailPath } : {};
+    return screenshotPath ? { screenshotPath } : {};
   }
 
   private updatePhase(

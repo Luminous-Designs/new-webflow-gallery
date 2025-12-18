@@ -11,6 +11,7 @@ import { toast, Toaster } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowLeft, ArrowRight, CheckCircle, Loader2 } from 'lucide-react';
 import Image from 'next/image';
+import { toAssetUrl } from '@/lib/assets';
 
 type Step = 'gallery' | 'details' | 'contract' | 'pricing' | 'checkout' | 'success';
 
@@ -21,7 +22,7 @@ interface Template {
   slug: string;
   author_name?: string;
   live_preview_url: string;
-  screenshot_thumbnail_path?: string;
+  screenshot_path?: string;
 }
 
 interface FormData {
@@ -194,13 +195,14 @@ export default function Home() {
         <div className="container mx-auto px-4 py-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              {selectedTemplate.screenshot_thumbnail_path && (
+              {selectedTemplate.screenshot_path && toAssetUrl(selectedTemplate.screenshot_path) && (
                 <div className="w-16 h-16 rounded overflow-hidden">
                   <Image
-                    src={selectedTemplate.screenshot_thumbnail_path}
+                    src={toAssetUrl(selectedTemplate.screenshot_path) || ''}
                     alt={selectedTemplate.name}
                     width={64}
                     height={64}
+                    sizes="64px"
                     className="object-cover"
                   />
                 </div>

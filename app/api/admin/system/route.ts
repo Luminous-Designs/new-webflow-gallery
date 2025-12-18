@@ -44,11 +44,8 @@ interface SystemStatsPayload {
   };
   storage: {
     screenshots: number;
-    thumbnails: number;
-    database: number;
     total: number;
     screenshotCount: number;
-    thumbnailCount: number;
   };
   recommendations: {
     maxConcurrency: number;
@@ -126,33 +123,11 @@ export async function GET(request: NextRequest) {
       };
     });
 
-    // Determine storage paths based on environment
-    const usePersistentVolume = process.env.USE_PERSISTENT_VOLUME === 'true';
-    const persistentVolumePath = process.env.PERSISTENT_VOLUME_PATH || '/templates-data/contents';
+    const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
 
-    // Get directory sizes - check persistent volume paths if enabled
-    let screenshotDir: string;
-    let thumbnailDir: string;
-    let dataDir: string;
-
-    if (usePersistentVolume) {
-      // Production VPS paths
-      screenshotDir = path.join(persistentVolumePath, 'screenshots');
-      thumbnailDir = path.join(persistentVolumePath, 'thumbnails');
-      dataDir = path.join(persistentVolumePath, 'data');
-    } else {
-      // Local development paths
-      screenshotDir = './public/screenshots';
-      thumbnailDir = './public/thumbnails';
-      dataDir = './data';
-    }
-
-    const [screenshotSize, thumbnailSize, dataSize, screenshotCount, thumbnailCount] = await Promise.all([
+    const [screenshotSize, screenshotCount] = await Promise.all([
       getDirectorySize(screenshotDir),
-      getDirectorySize(thumbnailDir),
-      getDirectorySize(dataDir),
       getFileCount(screenshotDir),
-      getFileCount(thumbnailDir)
     ]);
 
     // Get scraper memory usage estimate
@@ -160,7 +135,7 @@ export async function GET(request: NextRequest) {
 
     // Detect environment type
     const hostname = os.hostname();
-    const isVPS = usePersistentVolume ||
+    const isVPS =
                   hostname.includes('vps') ||
                   hostname.includes('server') ||
                   process.env.NODE_ENV === 'production' ||
@@ -170,7 +145,7 @@ export async function GET(request: NextRequest) {
     const environmentName = isVPS ? 'Production Server (VPS)' : 'Local Development';
     const environmentDescription = isVPS
       ? `Running on ${hostname} with persistent storage`
-      : `Running on ${hostname} - images stored locally`;
+      : `Running on ${hostname}`;
 
     const payload = {
       system: {
@@ -184,8 +159,8 @@ export async function GET(request: NextRequest) {
         type: environmentType,
         name: environmentName,
         description: environmentDescription,
-        persistentVolume: usePersistentVolume,
-        storagePath: usePersistentVolume ? persistentVolumePath : './public'
+        persistentVolume: isVPS,
+        storagePath: screenshotDir
       },
       cpu: {
         cores: cpus.length,
@@ -211,11 +186,8 @@ export async function GET(request: NextRequest) {
       },
       storage: {
         screenshots: screenshotSize,
-        thumbnails: thumbnailSize,
-        database: dataSize,
-        total: screenshotSize + thumbnailSize + dataSize,
-        screenshotCount,
-        thumbnailCount
+        total: screenshotSize,
+        screenshotCount
       },
       recommendations: {
         maxConcurrency: Math.min(cpus.length * 10, 100),

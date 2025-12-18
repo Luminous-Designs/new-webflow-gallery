@@ -107,20 +107,15 @@ export function SystemSection() {
           Storage Usage
         </h2>
         {systemStats ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="p-4 bg-gray-50 rounded">
               <div className="text-sm text-gray-600 mb-1">Screenshots</div>
               <div className="text-lg font-semibold">{formatBytes(systemStats.storage.screenshots)}</div>
               <div className="text-xs text-gray-400">{systemStats.storage.screenshotCount} files</div>
             </div>
             <div className="p-4 bg-gray-50 rounded">
-              <div className="text-sm text-gray-600 mb-1">Thumbnails</div>
-              <div className="text-lg font-semibold">{formatBytes(systemStats.storage.thumbnails)}</div>
-              <div className="text-xs text-gray-400">{systemStats.storage.thumbnailCount} files</div>
-            </div>
-            <div className="p-4 bg-gray-50 rounded">
-              <div className="text-sm text-gray-600 mb-1">Database</div>
-              <div className="text-lg font-semibold">{formatBytes(systemStats.storage.database)}</div>
+              <div className="text-sm text-gray-600 mb-1">Total</div>
+              <div className="text-lg font-semibold">{formatBytes(systemStats.storage.total)}</div>
             </div>
           </div>
         ) : (

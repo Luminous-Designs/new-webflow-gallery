@@ -1,6 +1,6 @@
 // Supabase Database Module
 // This module provides the database interface for the Webflow Gallery application
-// Replacing the SQLite implementation with Supabase
+// Backed by Supabase (Postgres)
 
 import {
   supabase,

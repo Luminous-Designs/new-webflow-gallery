@@ -7,14 +7,12 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { useAdmin } from './admin-context';
 import {
   Download,
-  HardDrive,
   Users,
   ShoppingCart,
   Sparkles,
   Camera,
   Server,
   Database,
-  Image as ImageIcon,
   Star,
   ChevronLeft,
   ChevronRight,
@@ -23,9 +21,7 @@ import {
   Folder,
   BarChart3,
   Settings,
-  Loader2,
   Ban,
-  FolderSync
 } from 'lucide-react';
 
 export type AdminSection =
@@ -33,13 +29,10 @@ export type AdminSection =
   | 'fresh-scraper'
   | 'blacklist'
   | 'screenshots'
-  | 'images'
   | 'authors'
   | 'ultra'
   | 'system'
-  | 'storage'
   | 'supabase-explorer'
-  | 'sync'
   | 'visitors'
   | 'purchases';
 
@@ -69,7 +62,7 @@ export function AdminSidebar({
   collapsed,
   onCollapsedChange
 }: AdminSidebarProps) {
-  const { logout, thumbnailQueueCounts, stats, systemStats } = useAdmin();
+  const { logout, stats, systemStats } = useAdmin();
 
   const navGroups: NavGroup[] = [
     {
@@ -90,31 +83,6 @@ export function AdminSidebar({
           id: 'screenshots',
           label: 'Screenshots',
           icon: Camera,
-        },
-        {
-          id: 'images',
-          label: 'Images',
-          icon: ImageIcon,
-          badge: () => {
-            const running = thumbnailQueueCounts.running;
-            const pending = thumbnailQueueCounts.pending;
-            if (running > 0) {
-              return (
-                <Badge variant="secondary" className="ml-auto h-5 px-1.5 text-xs bg-blue-100 text-blue-700">
-                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                  {running}
-                </Badge>
-              );
-            }
-            if (pending > 0) {
-              return (
-                <Badge variant="secondary" className="ml-auto h-5 px-1.5 text-xs bg-amber-100 text-amber-700">
-                  {pending}
-                </Badge>
-              );
-            }
-            return null;
-          }
         },
       ],
     },
@@ -176,32 +144,6 @@ export function AdminSidebar({
           id: 'supabase-explorer',
           label: 'Supabase Explorer',
           icon: Database,
-        },
-        {
-          id: 'storage',
-          label: 'Storage',
-          icon: HardDrive,
-          badge: () => {
-            if (systemStats?.storage?.total) {
-              const formatBytes = (bytes: number) => {
-                if (bytes < 1024) return `${bytes} B`;
-                if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-                if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-                return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-              };
-              return (
-                <Badge variant="outline" className="ml-auto h-5 px-1.5 text-[10px] text-gray-500">
-                  {formatBytes(systemStats.storage.total)}
-                </Badge>
-              );
-            }
-            return null;
-          }
-        },
-        {
-          id: 'sync',
-          label: 'VPS Sync',
-          icon: FolderSync,
         },
       ],
     },
