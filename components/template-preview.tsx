@@ -13,6 +13,7 @@ interface TemplatePreviewProps {
   primaryAction?: {
     label: string;
     onClick: (template: Template, currentUrl: string) => Promise<void> | void;
+    disabled?: boolean;
   };
 }
 
@@ -138,7 +139,7 @@ export default function TemplatePreview({ template, isOpen, onClose, primaryActi
   };
 
   const handlePrimaryActionClick = async () => {
-    if (!template || iframeLoading || actionLoading || !primaryAction?.onClick) {
+    if (!template || iframeLoading || actionLoading || primaryAction?.disabled || !primaryAction?.onClick) {
       return;
     }
 
@@ -284,7 +285,7 @@ export default function TemplatePreview({ template, isOpen, onClose, primaryActi
                 <Button
                   size="sm"
                   onClick={handlePrimaryActionClick}
-                  disabled={iframeLoading || actionLoading}
+                  disabled={iframeLoading || actionLoading || primaryAction.disabled}
                   className="flex items-center gap-2"
                 >
                   {actionLoading ? (

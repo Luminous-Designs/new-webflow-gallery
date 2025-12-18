@@ -95,6 +95,33 @@ async function attachSubcategoriesAndStyles(
   }));
 }
 
+type TemplateJoinRow = { templates?: TemplateRow | TemplateRow[] | null };
+
+function unwrapTemplates(rows: TemplateJoinRow[]): TemplateRow[] {
+  return (rows || [])
+    .map((row) => {
+      const rel = row?.templates;
+      return Array.isArray(rel) ? (rel[0] as TemplateRow | undefined) : (rel as TemplateRow | undefined);
+    })
+    .filter(Boolean) as TemplateRow[];
+}
+
+function toPostgrestList(values: string[]): string {
+  const escaped = values.map((value) => `"${String(value).replace(/"/g, '\\"')}"`);
+  return `(${escaped.join(',')})`;
+}
+
+function applyNonFeaturedAuthorFilter<T extends { or: (filters: string, options?: { foreignTable?: string }) => T }>(
+  query: T,
+  featuredAuthorIds: string[],
+  foreignTable?: string
+) {
+  if (!featuredAuthorIds.length) return query;
+  const list = toPostgrestList(featuredAuthorIds);
+  const filter = `author_id.is.null,author_id.not.in.${list}`;
+  return foreignTable ? query.or(filter, { foreignTable }) : query.or(filter);
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -112,7 +139,18 @@ export async function GET(request: NextRequest) {
     const collection = searchParams.get('collection');
 
     const featuredAuthorIds = await getFeaturedAuthorIdSet();
-    const featuredAuthorIdList = featured ? Array.from(featuredAuthorIds) : null;
+    const featuredAuthorIdList = Array.from(featuredAuthorIds);
+    const prioritizeFeaturedAuthors = !featured && !author && collection !== 'ultra' && featuredAuthorIdList.length > 0;
+    const applyFeaturedFilter = featured && featuredAuthorIdList.length > 0;
+
+    const emptyPagination = {
+      page,
+      limit,
+      total: 0,
+      totalPages: 0,
+      hasNext: false,
+      hasPrev: page > 1,
+    };
 
     if (collection === 'ultra') {
       const { data, count: total, error } = await supabaseAdmin
@@ -157,6 +195,10 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    if (featured && featuredAuthorIdList.length === 0) {
+      return jsonResponse({ templates: [], pagination: emptyPagination });
+    }
+
     let templates: TemplateRow[] = [];
     let total = 0;
 
@@ -167,33 +209,92 @@ export async function GET(request: NextRequest) {
         .eq('slug', subcategory)
         .single();
       if (subcatError || !subcat) {
-        return jsonResponse({
-          templates: [],
-          pagination: { page, limit, total: 0, totalPages: 0, hasNext: false, hasPrev: page > 1 },
-        });
+        return jsonResponse({ templates: [], pagination: emptyPagination });
       }
 
-      let query = supabaseAdmin
-        .from('template_subcategories')
-        .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`, { count: 'exact' })
-        .eq('subcategory_id', subcat.id)
-        .order('created_at', { foreignTable: 'templates', ascending: false })
-        .range(offset, offset + limit - 1);
+      if (prioritizeFeaturedAuthors) {
+        const { count: totalCount, error: totalError } = await supabaseAdmin
+          .from('template_subcategories')
+          .select('template_id', { count: 'exact', head: true })
+          .eq('subcategory_id', subcat.id);
+        if (totalError) throw totalError;
+        total = totalCount || 0;
 
-      if (author) query = query.eq('templates.author_id', author);
-      if (featuredAuthorIdList && featuredAuthorIdList.length > 0) {
-        query = query.in('templates.author_id', featuredAuthorIdList);
+        if (total > 0) {
+          const { count: featuredCount, error: featuredError } = await supabaseAdmin
+            .from('template_subcategories')
+            .select('template_id, templates!inner(author_id)', { count: 'exact', head: true })
+            .eq('subcategory_id', subcat.id)
+            .in('templates.author_id', featuredAuthorIdList);
+          if (featuredError) throw featuredError;
+          const featuredTotal = featuredCount || 0;
+
+          const start = offset;
+          if (start < featuredTotal) {
+            const featuredOffset = start;
+            const featuredLimit = Math.min(limit, featuredTotal - featuredOffset);
+            const remainingLimit = limit - featuredLimit;
+
+            const { data: featuredData, error: featuredDataError } = await supabaseAdmin
+              .from('template_subcategories')
+              .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`)
+              .eq('subcategory_id', subcat.id)
+              .in('templates.author_id', featuredAuthorIdList)
+              .order('created_at', { foreignTable: 'templates', ascending: false })
+              .range(featuredOffset, featuredOffset + featuredLimit - 1);
+            if (featuredDataError) throw featuredDataError;
+
+            const featuredTemplates = unwrapTemplates((featuredData || []) as TemplateJoinRow[]);
+            templates = [...featuredTemplates];
+
+            if (remainingLimit > 0) {
+              let nonFeaturedQuery = supabaseAdmin
+                .from('template_subcategories')
+                .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`)
+                .eq('subcategory_id', subcat.id)
+                .order('created_at', { foreignTable: 'templates', ascending: false });
+              nonFeaturedQuery = applyNonFeaturedAuthorFilter(nonFeaturedQuery, featuredAuthorIdList, 'templates');
+
+              const { data: nonFeaturedData, error: nonFeaturedError } = await nonFeaturedQuery
+                .range(0, remainingLimit - 1);
+              if (nonFeaturedError) throw nonFeaturedError;
+
+              templates = [...templates, ...unwrapTemplates((nonFeaturedData || []) as TemplateJoinRow[])];
+            }
+          } else {
+            const nonFeaturedOffset = start - featuredTotal;
+            let nonFeaturedQuery = supabaseAdmin
+              .from('template_subcategories')
+              .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`)
+              .eq('subcategory_id', subcat.id)
+              .order('created_at', { foreignTable: 'templates', ascending: false });
+            nonFeaturedQuery = applyNonFeaturedAuthorFilter(nonFeaturedQuery, featuredAuthorIdList, 'templates');
+
+            const { data: nonFeaturedData, error: nonFeaturedError } = await nonFeaturedQuery
+              .range(nonFeaturedOffset, nonFeaturedOffset + limit - 1);
+            if (nonFeaturedError) throw nonFeaturedError;
+
+            templates = unwrapTemplates((nonFeaturedData || []) as TemplateJoinRow[]);
+          }
+        }
+      } else {
+        let query = supabaseAdmin
+          .from('template_subcategories')
+          .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`, { count: 'exact' })
+          .eq('subcategory_id', subcat.id)
+          .order('created_at', { foreignTable: 'templates', ascending: false })
+          .range(offset, offset + limit - 1);
+
+        if (author) query = query.eq('templates.author_id', author);
+        if (applyFeaturedFilter) {
+          query = query.in('templates.author_id', featuredAuthorIdList);
+        }
+
+        const { data, count, error } = await query;
+        if (error) throw error;
+        total = count || 0;
+        templates = unwrapTemplates((data || []) as TemplateJoinRow[]);
       }
-
-      const { data, count, error } = await query;
-      if (error) throw error;
-      total = count || 0;
-      templates = (data || [])
-        .map((row) => {
-          const rel = (row as unknown as { templates?: unknown })?.templates;
-          return Array.isArray(rel) ? (rel[0] as TemplateRow | undefined) : (rel as TemplateRow | undefined);
-        })
-        .filter(Boolean) as TemplateRow[];
     } else if (style) {
       const { data: styleRow, error: styleError } = await supabaseAdmin
         .from('styles')
@@ -201,46 +302,166 @@ export async function GET(request: NextRequest) {
         .eq('slug', style)
         .single();
       if (styleError || !styleRow) {
-        return jsonResponse({
-          templates: [],
-          pagination: { page, limit, total: 0, totalPages: 0, hasNext: false, hasPrev: page > 1 },
-        });
+        return jsonResponse({ templates: [], pagination: emptyPagination });
       }
 
-      let query = supabaseAdmin
-        .from('template_styles')
-        .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`, { count: 'exact' })
-        .eq('style_id', styleRow.id)
-        .order('created_at', { foreignTable: 'templates', ascending: false })
-        .range(offset, offset + limit - 1);
+      if (prioritizeFeaturedAuthors) {
+        const { count: totalCount, error: totalError } = await supabaseAdmin
+          .from('template_styles')
+          .select('template_id', { count: 'exact', head: true })
+          .eq('style_id', styleRow.id);
+        if (totalError) throw totalError;
+        total = totalCount || 0;
 
-      if (author) query = query.eq('templates.author_id', author);
-      if (featuredAuthorIdList && featuredAuthorIdList.length > 0) {
-        query = query.in('templates.author_id', featuredAuthorIdList);
+        if (total > 0) {
+          const { count: featuredCount, error: featuredError } = await supabaseAdmin
+            .from('template_styles')
+            .select('template_id, templates!inner(author_id)', { count: 'exact', head: true })
+            .eq('style_id', styleRow.id)
+            .in('templates.author_id', featuredAuthorIdList);
+          if (featuredError) throw featuredError;
+          const featuredTotal = featuredCount || 0;
+
+          const start = offset;
+          if (start < featuredTotal) {
+            const featuredOffset = start;
+            const featuredLimit = Math.min(limit, featuredTotal - featuredOffset);
+            const remainingLimit = limit - featuredLimit;
+
+            const { data: featuredData, error: featuredDataError } = await supabaseAdmin
+              .from('template_styles')
+              .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`)
+              .eq('style_id', styleRow.id)
+              .in('templates.author_id', featuredAuthorIdList)
+              .order('created_at', { foreignTable: 'templates', ascending: false })
+              .range(featuredOffset, featuredOffset + featuredLimit - 1);
+            if (featuredDataError) throw featuredDataError;
+
+            const featuredTemplates = unwrapTemplates((featuredData || []) as TemplateJoinRow[]);
+            templates = [...featuredTemplates];
+
+            if (remainingLimit > 0) {
+              let nonFeaturedQuery = supabaseAdmin
+                .from('template_styles')
+                .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`)
+                .eq('style_id', styleRow.id)
+                .order('created_at', { foreignTable: 'templates', ascending: false });
+              nonFeaturedQuery = applyNonFeaturedAuthorFilter(nonFeaturedQuery, featuredAuthorIdList, 'templates');
+
+              const { data: nonFeaturedData, error: nonFeaturedError } = await nonFeaturedQuery
+                .range(0, remainingLimit - 1);
+              if (nonFeaturedError) throw nonFeaturedError;
+
+              templates = [...templates, ...unwrapTemplates((nonFeaturedData || []) as TemplateJoinRow[])];
+            }
+          } else {
+            const nonFeaturedOffset = start - featuredTotal;
+            let nonFeaturedQuery = supabaseAdmin
+              .from('template_styles')
+              .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`)
+              .eq('style_id', styleRow.id)
+              .order('created_at', { foreignTable: 'templates', ascending: false });
+            nonFeaturedQuery = applyNonFeaturedAuthorFilter(nonFeaturedQuery, featuredAuthorIdList, 'templates');
+
+            const { data: nonFeaturedData, error: nonFeaturedError } = await nonFeaturedQuery
+              .range(nonFeaturedOffset, nonFeaturedOffset + limit - 1);
+            if (nonFeaturedError) throw nonFeaturedError;
+
+            templates = unwrapTemplates((nonFeaturedData || []) as TemplateJoinRow[]);
+          }
+        }
+      } else {
+        let query = supabaseAdmin
+          .from('template_styles')
+          .select(`template_id, templates!inner(${TEMPLATE_CARD_SELECT})`, { count: 'exact' })
+          .eq('style_id', styleRow.id)
+          .order('created_at', { foreignTable: 'templates', ascending: false })
+          .range(offset, offset + limit - 1);
+
+        if (author) query = query.eq('templates.author_id', author);
+        if (applyFeaturedFilter) {
+          query = query.in('templates.author_id', featuredAuthorIdList);
+        }
+
+        const { data, count, error } = await query;
+        if (error) throw error;
+        total = count || 0;
+        templates = unwrapTemplates((data || []) as TemplateJoinRow[]);
       }
-
-      const { data, count, error } = await query;
-      if (error) throw error;
-      total = count || 0;
-      templates = (data || [])
-        .map((row) => {
-          const rel = (row as unknown as { templates?: unknown })?.templates;
-          return Array.isArray(rel) ? (rel[0] as TemplateRow | undefined) : (rel as TemplateRow | undefined);
-        })
-        .filter(Boolean) as TemplateRow[];
     } else {
-      let query = supabaseAdmin.from('templates').select(TEMPLATE_CARD_SELECT, { count: 'exact' });
-      if (author) query = query.eq('author_id', author);
-      if (featuredAuthorIdList && featuredAuthorIdList.length > 0) {
-        query = query.in('author_id', featuredAuthorIdList);
-      }
+      if (prioritizeFeaturedAuthors) {
+        const { count: totalCount, error: totalError } = await supabaseAdmin
+          .from('templates')
+          .select('id', { count: 'exact', head: true });
+        if (totalError) throw totalError;
+        total = totalCount || 0;
 
-      const { data, count, error } = await query
-        .order('created_at', { ascending: false })
-        .range(offset, offset + limit - 1);
-      if (error) throw error;
-      total = count || 0;
-      templates = (data || []) as TemplateRow[];
+        if (total > 0) {
+          const { count: featuredCount, error: featuredError } = await supabaseAdmin
+            .from('templates')
+            .select('id', { count: 'exact', head: true })
+            .in('author_id', featuredAuthorIdList);
+          if (featuredError) throw featuredError;
+          const featuredTotal = featuredCount || 0;
+
+          const start = offset;
+          if (start < featuredTotal) {
+            const featuredOffset = start;
+            const featuredLimit = Math.min(limit, featuredTotal - featuredOffset);
+            const remainingLimit = limit - featuredLimit;
+
+            const { data: featuredData, error: featuredDataError } = await supabaseAdmin
+              .from('templates')
+              .select(TEMPLATE_CARD_SELECT)
+              .in('author_id', featuredAuthorIdList)
+              .order('created_at', { ascending: false })
+              .range(featuredOffset, featuredOffset + featuredLimit - 1);
+            if (featuredDataError) throw featuredDataError;
+
+            templates = (featuredData || []) as TemplateRow[];
+
+            if (remainingLimit > 0) {
+              let nonFeaturedQuery = supabaseAdmin
+                .from('templates')
+                .select(TEMPLATE_CARD_SELECT)
+                .order('created_at', { ascending: false });
+              nonFeaturedQuery = applyNonFeaturedAuthorFilter(nonFeaturedQuery, featuredAuthorIdList);
+
+              const { data: nonFeaturedData, error: nonFeaturedError } = await nonFeaturedQuery
+                .range(0, remainingLimit - 1);
+              if (nonFeaturedError) throw nonFeaturedError;
+
+              templates = [...templates, ...((nonFeaturedData || []) as TemplateRow[])];
+            }
+          } else {
+            const nonFeaturedOffset = start - featuredTotal;
+            let nonFeaturedQuery = supabaseAdmin
+              .from('templates')
+              .select(TEMPLATE_CARD_SELECT)
+              .order('created_at', { ascending: false });
+            nonFeaturedQuery = applyNonFeaturedAuthorFilter(nonFeaturedQuery, featuredAuthorIdList);
+
+            const { data: nonFeaturedData, error: nonFeaturedError } = await nonFeaturedQuery
+              .range(nonFeaturedOffset, nonFeaturedOffset + limit - 1);
+            if (nonFeaturedError) throw nonFeaturedError;
+
+            templates = (nonFeaturedData || []) as TemplateRow[];
+          }
+        }
+      } else {
+        let query = supabaseAdmin.from('templates').select(TEMPLATE_CARD_SELECT, { count: 'exact' });
+        if (author) query = query.eq('author_id', author);
+        if (applyFeaturedFilter) {
+          query = query.in('author_id', featuredAuthorIdList);
+        }
+
+        const { data, count, error } = await query
+          .order('created_at', { ascending: false })
+          .range(offset, offset + limit - 1);
+        if (error) throw error;
+        total = count || 0;
+        templates = (data || []) as TemplateRow[];
+      }
     }
 
     const templatesWithMeta = await attachSubcategoriesAndStyles(templates);
