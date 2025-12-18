@@ -584,7 +584,7 @@ export async function getUltraFeaturedTemplates(): Promise<TemplateWithMetadata[
     const templateId = row.template_id as number;
     const rel = row.subcategories as unknown;
     const names = Array.isArray(rel)
-      ? rel.map((r) => (r as { name?: string } | null)?.name).filter(Boolean)
+      ? rel.map((r) => (r as { name?: string } | null)?.name).filter((name): name is string => Boolean(name))
       : (rel as { name?: string } | null)?.name ? [(rel as { name?: string }).name as string] : [];
     if (!names.length) return;
     const existing = subcatsByTemplateId.get(templateId) || [];
@@ -596,7 +596,7 @@ export async function getUltraFeaturedTemplates(): Promise<TemplateWithMetadata[
     const templateId = row.template_id as number;
     const rel = row.styles as unknown;
     const names = Array.isArray(rel)
-      ? rel.map((r) => (r as { name?: string } | null)?.name).filter(Boolean)
+      ? rel.map((r) => (r as { name?: string } | null)?.name).filter((name): name is string => Boolean(name))
       : (rel as { name?: string } | null)?.name ? [(rel as { name?: string }).name as string] : [];
     if (!names.length) return;
     const existing = stylesByTemplateId.get(templateId) || [];
