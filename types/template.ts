@@ -15,5 +15,6 @@ export interface Template {
   styles: string[];
   is_featured_author?: boolean;
   position?: number;
+  created_at?: string;
   [key: string]: unknown;
 }

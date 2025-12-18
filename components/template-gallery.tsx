@@ -3,13 +3,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { motion } from 'framer-motion';
-import { Eye, X, Loader2, Search, Sparkles } from 'lucide-react';
+import { Eye, X, Loader2, Search, Sparkles, ExternalLink, Calendar, User } from 'lucide-react';
 import Image from 'next/image';
 import { useInView } from '@/hooks/useInView';
 import TemplatePreview from './template-preview';
@@ -18,11 +18,20 @@ import { toAssetUrl } from '@/lib/assets';
 
 interface TemplateCardProps {
   template: Template;
-  onSelect: (template: Template) => void;
   onPreview: (template: Template) => void;
 }
 
-function TemplateCard({ template, onSelect, onPreview }: TemplateCardProps) {
+function formatDate(dateString?: string): string {
+  if (!dateString) return 'N/A';
+  const date = new Date(dateString);
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
+  });
+}
+
+function TemplateCard({ template, onPreview }: TemplateCardProps) {
   const [isHovered, setIsHovered] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const animationRef = useRef<NodeJS.Timeout | null>(null);
@@ -34,16 +43,13 @@ function TemplateCard({ template, onSelect, onPreview }: TemplateCardProps) {
       const scrollHeight = element.scrollHeight;
       const clientHeight = element.clientHeight;
       const scrollDistance = scrollHeight - clientHeight;
-      const duration = scrollDistance * 15; // Adjust speed here
+      const duration = scrollDistance * 15;
 
-      // Start scrolling animation
       element.style.transition = `transform ${duration}ms cubic-bezier(0.25, 0.46, 0.45, 0.94)`;
       element.style.transform = `translateY(-${scrollDistance}px)`;
 
       animationRef.current = setTimeout(() => {
-        // Pause at bottom
         animationRef.current = setTimeout(() => {
-          // Scroll back up
           if (element) {
             element.style.transition = `transform ${duration / 2}ms cubic-bezier(0.25, 0.46, 0.45, 0.94)`;
             element.style.transform = 'translateY(0)';
@@ -51,7 +57,6 @@ function TemplateCard({ template, onSelect, onPreview }: TemplateCardProps) {
         }, 1000);
       }, duration);
     } else if (scrollRef.current) {
-      // Reset scroll on hover out
       const element = scrollRef.current;
       element.style.transition = 'transform 500ms ease-out';
       element.style.transform = 'translateY(0)';
@@ -69,14 +74,16 @@ function TemplateCard({ template, onSelect, onPreview }: TemplateCardProps) {
   }, [isHovered]);
 
   return (
-    <motion.div
+    <motion.article
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4 }}
+      className="group"
     >
-      <Card className="overflow-hidden group hover:shadow-xl transition-all duration-300 p-0">
+      <div className="overflow-hidden bg-white border border-neutral-200 transition-all duration-300 hover:border-neutral-400">
+        {/* Image Container */}
         <div
-          className="relative aspect-[16/10] overflow-hidden bg-gray-100"
+          className="relative aspect-[16/10] overflow-hidden bg-neutral-100"
           onMouseEnter={() => setIsHovered(true)}
           onMouseLeave={() => setIsHovered(false)}
         >
@@ -85,71 +92,105 @@ function TemplateCard({ template, onSelect, onPreview }: TemplateCardProps) {
               <Image
                 src={toAssetUrl(template.screenshot_path)!}
                 alt={template.name}
-                width={800}
-                height={500}
+                width={1200}
+                height={750}
                 sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
                 className="w-full h-auto"
               />
             </div>
           ) : (
             <div className="w-full h-full flex items-center justify-center">
-              <span className="text-gray-400">No preview available</span>
+              <span className="text-neutral-400 text-sm tracking-wide uppercase">No preview</span>
             </div>
           )}
 
-          {/* Overlay with actions */}
-          <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-            <div className="absolute bottom-4 left-4 right-4 flex gap-2">
+          {/* Featured Label - Positioned at top-left corner */}
+          {template.is_featured_author && (
+            <div className="absolute top-0 left-0 z-10">
+              <div className="bg-neutral-900 text-white px-3 py-1.5 text-[10px] font-medium tracking-[0.2em] uppercase flex items-center gap-1.5">
+                <Sparkles className="h-3 w-3" />
+                Featured
+              </div>
+            </div>
+          )}
+
+          {/* Hover Overlay with Actions */}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end">
+            <div className="p-5 flex gap-3">
               <Button
                 size="sm"
                 variant="secondary"
-                className="flex-1"
+                className="flex-1 bg-white/90 hover:bg-white text-neutral-900 border-0 rounded-none h-10 text-xs font-medium tracking-wide uppercase"
                 onClick={(e) => {
                   e.stopPropagation();
                   onPreview(template);
                 }}
               >
-                <Eye className="h-4 w-4 mr-1" />
+                <Eye className="h-4 w-4 mr-2" />
                 Preview
               </Button>
               <Button
                 size="sm"
-                className="flex-1"
+                className="flex-1 bg-neutral-900 hover:bg-neutral-800 text-white border-0 rounded-none h-10 text-xs font-medium tracking-wide uppercase"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onSelect(template);
+                  window.open(template.storefront_url, '_blank');
                 }}
               >
-                Select
+                <ExternalLink className="h-4 w-4 mr-2" />
+                Buy Now
               </Button>
             </div>
           </div>
         </div>
 
-        <div className="p-4 space-y-2">
-          <div className="flex items-start justify-between gap-2">
-            <h3 className="font-semibold text-lg line-clamp-1">{template.name}</h3>
-            {template.is_featured_author && (
-              <Badge variant="default" className="bg-purple-600 hover:bg-purple-700 shrink-0">
-                Featured
-              </Badge>
-            )}
+        {/* Card Content */}
+        <div className="p-5 space-y-4 border-t border-neutral-100">
+          {/* Template Name */}
+          <h3 className="font-semibold text-lg text-neutral-900 line-clamp-1 tracking-tight">
+            {template.name}
+          </h3>
+
+          {/* Author */}
+          <div className="flex items-center gap-2 text-neutral-600">
+            <User className="h-3.5 w-3.5" />
+            <span className="text-sm">{template.author_name || 'Unknown Author'}</span>
           </div>
 
-          {template.price && (
-            <Badge variant="secondary">{template.price}</Badge>
-          )}
+          {/* Date Published */}
+          <div className="flex items-center gap-2 text-neutral-500">
+            <Calendar className="h-3.5 w-3.5" />
+            <span className="text-xs tracking-wide">{formatDate(template.created_at)}</span>
+          </div>
 
-          <div className="flex gap-2 flex-wrap">
-            {template.subcategories.map((cat, idx) => (
-              <Badge key={idx} variant="outline" className="text-xs">
-                {cat}
-              </Badge>
-            ))}
+          {/* Price */}
+          <div className="pt-2 border-t border-neutral-100">
+            <span className="text-xl font-semibold text-neutral-900 tracking-tight">
+              {template.price || 'Free'}
+            </span>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex gap-3 pt-2">
+            <Button
+              size="sm"
+              className="flex-1 bg-neutral-900 hover:bg-neutral-800 text-white rounded-none h-11 text-xs font-medium tracking-wide uppercase"
+              onClick={() => window.open(template.storefront_url, '_blank')}
+            >
+              Buy Now
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="flex-1 border-neutral-300 hover:bg-neutral-50 text-neutral-700 rounded-none h-11 text-xs font-medium tracking-wide uppercase"
+              onClick={() => onPreview(template)}
+            >
+              Live Preview
+            </Button>
           </div>
         </div>
-      </Card>
-    </motion.div>
+      </div>
+    </motion.article>
   );
 }
 
@@ -165,9 +206,9 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
   const [selectedTag, setSelectedTag] = useState<{ slug: string; type: 'subcategory' | 'style' | '' }>({ slug: '', type: '' });
   const [collection, setCollection] = useState<'ultra' | 'all'>('ultra');
   const [subcategories, setSubcategories] = useState<{id: number; name: string; slug: string; display_name: string; template_count: number}[]>([]);
+  const [styles, setStyles] = useState<{id: number; name: string; slug: string; display_name: string; template_count: number}[]>([]);
   const [previewTemplate, setPreviewTemplate] = useState<Template | null>(null);
   const [tagSearch, setTagSearch] = useState('');
-  const [showSuggestions, setShowSuggestions] = useState(false);
   const [allTags, setAllTags] = useState<{
     id: number;
     name: string;
@@ -180,6 +221,7 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
   const pageRef = useRef(1);
   const hasMoreRef = useRef(true);
   const loadingRef = useRef(false);
+
   const normalizeTemplate = (template: any): Template => ({
     id: template.id,
     template_id: template.template_id,
@@ -196,25 +238,24 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     subcategories: Array.isArray(template.subcategories) ? template.subcategories : [],
     styles: Array.isArray(template.styles) ? template.styles : [],
     is_featured_author: template.is_featured_author,
-    position: template.position
+    position: template.position,
+    created_at: template.created_at
   });
 
   // Fetch subcategories and all tags
   useEffect(() => {
-    // Fetch subcategories
     fetch('/api/subcategories')
       .then(res => res.json())
       .then(data => {
         setSubcategories(data);
-        // Combine subcategories and styles for tag search
         setAllTags(data.map((cat: any) => ({ ...cat, type: 'subcategory' })));
       })
       .catch(console.error);
 
-    // Fetch styles
     fetch('/api/styles')
       .then(res => res.json())
       .then(data => {
+        setStyles(data);
         setAllTags(prev => [...prev, ...data.map((style: any) => ({ ...style, type: 'style' }))]);
       })
       .catch(console.error);
@@ -222,18 +263,8 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
 
   // Main fetch function
   const fetchTemplates = useCallback(async (page: number, isReset: boolean = false) => {
-    // Prevent duplicate calls
-    if (loadingRef.current) {
-      console.log('⏸️ Already loading, skipping fetch');
-      return;
-    }
-
-    if (!isReset && !hasMoreRef.current) {
-      console.log('🛑 No more pages to load');
-      return;
-    }
-
-    console.log(`📥 Fetching page ${page}, reset: ${isReset}, tag: ${selectedTag.slug || 'all'}, collection: ${collection}`);
+    if (loadingRef.current) return;
+    if (!isReset && !hasMoreRef.current) return;
 
     loadingRef.current = true;
     if (isReset) {
@@ -258,18 +289,10 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
         }
       }
 
-      const url = `/api/templates?${params}`;
-      console.log(`🌐 API URL: ${url}`);
-
-      const response = await fetch(url);
+      const response = await fetch(`/api/templates?${params}`);
       const data = await response.json();
 
-      if (!data.templates || !data.pagination) {
-        console.error('❌ Invalid API response structure:', data);
-        return;
-      }
-
-      console.log(`✅ Received ${data.templates.length} templates, hasNext: ${data.pagination.hasNext}`);
+      if (!data.templates || !data.pagination) return;
 
       const normalized = data.templates.map(normalizeTemplate);
 
@@ -289,7 +312,7 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
       });
 
     } catch (error) {
-      console.error('❌ Fetch error:', error);
+      console.error('Fetch error:', error);
     } finally {
       loadingRef.current = false;
       setLoading(false);
@@ -299,7 +322,6 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
 
   // Reset and fetch when tag changes
   useEffect(() => {
-    console.log('🔄 Tag changed, resetting...');
     setTemplates([]);
     pageRef.current = 1;
     hasMoreRef.current = true;
@@ -309,113 +331,160 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
   // Handle infinite scroll
   useEffect(() => {
     if (inView && !loadingRef.current && hasMoreRef.current && templates.length > 0) {
-      console.log(`👀 In view! Loading page ${pageRef.current}`);
       fetchTemplates(pageRef.current, false);
     }
-  }, [fetchTemplates, inView, templates.length])
+  }, [fetchTemplates, inView, templates.length]);
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-neutral-50">
       {/* Hero Section */}
-      <div className="bg-white border-b">
-        <div className="container mx-auto px-4 py-12">
-          <h1 className="text-4xl font-bold mb-4">Select Your Webflow Template</h1>
-          <p className="text-lg text-gray-600">
-            Choose from our curated collection of premium templates to kickstart your redesign
+      <header className="bg-white border-b border-neutral-200">
+        <div className="w-full px-6 lg:px-12 py-16">
+          <h1 className="text-4xl lg:text-5xl font-bold text-neutral-900 tracking-tight mb-4">
+            Template Gallery
+          </h1>
+          <p className="text-lg text-neutral-600 max-w-2xl">
+            Curated collection of premium Webflow templates for your next project
           </p>
         </div>
-      </div>
+      </header>
 
-      {/* Removed Featured Authors Section - templates from featured authors are now prioritized in the main grid */}
+      {/* Main Layout with Sidebar */}
+      <div className="flex w-full">
+        {/* Sidebar - Independently Scrollable */}
+        <aside className="hidden lg:block w-72 xl:w-80 border-r border-neutral-200 bg-white sticky top-0 h-screen">
+          <ScrollArea className="h-full">
+            <div className="p-6 space-y-6">
+              {/* Search */}
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
+                  Search Tags
+                </label>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-neutral-400" />
+                  <Input
+                    placeholder="Search..."
+                    value={tagSearch}
+                    onChange={(e) => setTagSearch(e.target.value)}
+                    className="pl-10 rounded-none border-neutral-300 focus:border-neutral-900 focus:ring-0 h-10"
+                  />
+                </div>
+              </div>
 
-      {/* Tag Search and Subcategory Filters */}
-      <div className="container mx-auto px-4 py-4 space-y-4">
-        {/* Tag Search Box */}
-        <div className="relative max-w-md">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-            <Input
-              placeholder="Search tags (e.g. portfolio, agency, minimal)..."
-              value={tagSearch}
-              onChange={(e) => {
-                setTagSearch(e.target.value);
-                setShowSuggestions(e.target.value.length > 0);
-              }}
-              onFocus={() => setShowSuggestions(tagSearch.length > 0)}
-              onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
-              className="pl-10"
-            />
-          </div>
-
-          {/* Tag Suggestions Dropdown */}
-          {showSuggestions && (
-            <div className="absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-y-auto">
-              {allTags
-                .filter(tag =>
-                  tag.display_name.toLowerCase().includes(tagSearch.toLowerCase()) ||
-                  tag.slug.toLowerCase().includes(tagSearch.toLowerCase())
-                )
-                .slice(0, 10)
-                .map((tag) => (
+              {/* Collection Filters */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
+                  Collection
+                </h3>
+                <div className="space-y-1">
                   <button
-                    key={`${tag.type}-${tag.id}`}
-                    className="w-full text-left px-4 py-2 hover:bg-gray-50 flex items-center justify-between"
+                    onClick={() => {
+                      setCollection('ultra');
+                      setSelectedTag({ slug: '', type: '' });
+                    }}
+                    className={`w-full text-left px-4 py-3 text-sm transition-colors flex items-center justify-between ${
+                      collection === 'ultra'
+                        ? 'bg-neutral-900 text-white'
+                        : 'hover:bg-neutral-100 text-neutral-700'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4" />
+                      Ultra Featured
+                    </span>
+                  </button>
+                  <button
                     onClick={() => {
                       setCollection('all');
-                      setSelectedTag({ slug: tag.slug, type: tag.type });
-                      setTagSearch('');
-                      setShowSuggestions(false);
+                      setSelectedTag({ slug: '', type: '' });
                     }}
+                    className={`w-full text-left px-4 py-3 text-sm transition-colors ${
+                      collection === 'all' && !selectedTag.slug
+                        ? 'bg-neutral-900 text-white'
+                        : 'hover:bg-neutral-100 text-neutral-700'
+                    }`}
                   >
-                    <span className="font-medium">{tag.display_name}</span>
-                    <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="text-xs">
-                        {tag.type}
-                      </Badge>
-                      <Badge variant="secondary" className="text-xs">
-                        {tag.template_count}
-                      </Badge>
-                    </div>
+                    All Templates
                   </button>
-                ))}
-              {allTags.filter(tag =>
-                tag.display_name.toLowerCase().includes(tagSearch.toLowerCase()) ||
-                tag.slug.toLowerCase().includes(tagSearch.toLowerCase())
-              ).length === 0 && (
-                <div className="px-4 py-3 text-gray-500 text-sm">
-                  No tags found matching {tagSearch}
                 </div>
-              )}
-            </div>
-          )}
-        </div>
+              </div>
 
-        {/* Subcategory Filter Chips */}
-        <div>
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-sm font-medium text-gray-600">Filter by category:</span>
-            {selectedTag.slug && (
-              <Badge
-                variant="default"
-                className="cursor-pointer"
-                onClick={() => {
-                  setCollection('all');
-                  setSelectedTag({ slug: '', type: '' });
-                }}
-              >
-                {allTags.find(t => t.slug === selectedTag.slug)?.display_name}
-                <X className="h-3 w-3 ml-1" />
-              </Badge>
-            )}
-          </div>
-          {collection === 'ultra' && (
-            <div className="mb-3 flex items-center gap-2 rounded-md border border-purple-100 bg-purple-50 px-3 py-2 text-sm text-purple-700">
-              <Sparkles className="h-4 w-4" />
-              Showing ultra-featured templates curated by our team.
+              {/* Subcategories */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
+                  Categories
+                </h3>
+                <div className="space-y-1">
+                  {subcategories
+                    .filter(cat => !tagSearch || cat.display_name.toLowerCase().includes(tagSearch.toLowerCase()))
+                    .map((cat) => (
+                      <button
+                        key={cat.id}
+                        onClick={() => {
+                          setCollection('all');
+                          setSelectedTag({ slug: cat.slug, type: 'subcategory' });
+                        }}
+                        className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
+                          selectedTag.slug === cat.slug && selectedTag.type === 'subcategory'
+                            ? 'bg-neutral-900 text-white'
+                            : 'hover:bg-neutral-100 text-neutral-700'
+                        }`}
+                      >
+                        <span>{cat.display_name}</span>
+                        <span className={`text-xs ${
+                          selectedTag.slug === cat.slug && selectedTag.type === 'subcategory'
+                            ? 'text-neutral-400'
+                            : 'text-neutral-400'
+                        }`}>
+                          {cat.template_count}
+                        </span>
+                      </button>
+                    ))}
+                </div>
+              </div>
+
+              {/* Styles */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
+                  Styles
+                </h3>
+                <div className="space-y-1">
+                  {styles
+                    .filter(style => !tagSearch || style.display_name.toLowerCase().includes(tagSearch.toLowerCase()))
+                    .map((style) => (
+                      <button
+                        key={style.id}
+                        onClick={() => {
+                          setCollection('all');
+                          setSelectedTag({ slug: style.slug, type: 'style' });
+                        }}
+                        className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
+                          selectedTag.slug === style.slug && selectedTag.type === 'style'
+                            ? 'bg-neutral-900 text-white'
+                            : 'hover:bg-neutral-100 text-neutral-700'
+                        }`}
+                      >
+                        <span>{style.display_name}</span>
+                        <span className={`text-xs ${
+                          selectedTag.slug === style.slug && selectedTag.type === 'style'
+                            ? 'text-neutral-400'
+                            : 'text-neutral-400'
+                        }`}>
+                          {style.template_count}
+                        </span>
+                      </button>
+                    ))}
+                </div>
+              </div>
             </div>
-          )}
-          <div className="overflow-x-auto pb-2">
-            <div className="flex gap-2 whitespace-nowrap pr-4">
+          </ScrollArea>
+        </aside>
+
+        {/* Main Content */}
+        <main className="flex-1 min-w-0">
+          {/* Mobile Filters */}
+          <div className="lg:hidden sticky top-0 z-20 bg-white border-b border-neutral-200 p-4">
+            <div className="flex items-center gap-3 overflow-x-auto pb-2 scrollbar-hide">
               <Button
                 size="sm"
                 variant={collection === 'ultra' ? 'default' : 'outline'}
@@ -423,121 +492,162 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                   setCollection('ultra');
                   setSelectedTag({ slug: '', type: '' });
                 }}
-                className="whitespace-nowrap"
+                className="rounded-none shrink-0"
               >
-                Ultra Featured
+                <Sparkles className="h-4 w-4 mr-1" />
+                Featured
               </Button>
               <Button
                 size="sm"
-                variant={collection === 'all' && selectedTag.slug === '' ? 'default' : 'outline'}
+                variant={collection === 'all' && !selectedTag.slug ? 'default' : 'outline'}
                 onClick={() => {
                   setCollection('all');
                   setSelectedTag({ slug: '', type: '' });
                 }}
-                className="whitespace-nowrap"
+                className="rounded-none shrink-0"
               >
                 All
               </Button>
-              {subcategories.map((cat) => (
+              {subcategories.slice(0, 5).map((cat) => (
                 <Button
                   key={cat.id}
                   size="sm"
-                  variant={selectedTag.slug === cat.slug && selectedTag.type === 'subcategory' ? 'default' : 'outline'}
+                  variant={selectedTag.slug === cat.slug ? 'default' : 'outline'}
                   onClick={() => {
                     setCollection('all');
                     setSelectedTag({ slug: cat.slug, type: 'subcategory' });
                   }}
-                  className="whitespace-nowrap"
+                  className="rounded-none shrink-0"
                 >
                   {cat.display_name}
-                  <Badge variant="secondary" className="ml-2">
-                    {cat.template_count}
-                  </Badge>
                 </Button>
               ))}
             </div>
           </div>
-        </div>
-      </div>
 
-      {/* Main Template Grid */}
-      <div className="container mx-auto px-4 py-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {templates.map((template) => (
-            <TemplateCard
-              key={template.id}
-              template={template}
-              onSelect={onTemplateSelect}
-              onPreview={setPreviewTemplate}
-            />
-          ))}
-        </div>
-
-        {/* Initial loading indicator */}
-        {loading && templates.length === 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mt-6">
-            {[...Array(8)].map((_, i) => (
-              <Card key={i} className="overflow-hidden">
-                <Skeleton className="aspect-square" />
-                <div className="p-4 space-y-2">
-                  <Skeleton className="h-6 w-3/4" />
-                  <Skeleton className="h-4 w-1/2" />
-                </div>
-              </Card>
-            ))}
-          </div>
-        )}
-
-        {/* Load more indicator */}
-        {loadingMore && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mt-6">
-            {[...Array(4)].map((_, i) => (
-              <Card key={i} className="overflow-hidden">
-                <Skeleton className="aspect-square" />
-                <div className="p-4 space-y-2">
-                  <Skeleton className="h-6 w-3/4" />
-                  <Skeleton className="h-4 w-1/2" />
-                </div>
-              </Card>
-            ))}
-          </div>
-        )}
-
-        {/* Load more trigger */}
-        {pageInfo.hasNext && !loading && !loadingMore && templates.length > 0 && (
-          <div ref={loadMoreRef} className="py-8 flex flex-col items-center justify-center gap-4">
-            <div className="text-gray-500 text-center">
-              <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
-              <span>Scroll to load more templates...</span>
+          {/* Active Filter Display */}
+          {(selectedTag.slug || collection === 'ultra') && (
+            <div className="px-6 lg:px-12 py-4 bg-white border-b border-neutral-200">
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-neutral-500">Viewing:</span>
+                <Badge
+                  variant="secondary"
+                  className="rounded-none bg-neutral-900 text-white hover:bg-neutral-800 cursor-pointer px-3 py-1"
+                  onClick={() => {
+                    if (collection === 'ultra') {
+                      setCollection('all');
+                    }
+                    setSelectedTag({ slug: '', type: '' });
+                  }}
+                >
+                  {collection === 'ultra'
+                    ? 'Ultra Featured'
+                    : allTags.find(t => t.slug === selectedTag.slug)?.display_name}
+                  <X className="h-3 w-3 ml-2" />
+                </Badge>
+              </div>
             </div>
-            <Button
-              variant="outline"
-              onClick={() => {
-                console.log('🖱️ Manual load more clicked');
-                fetchTemplates(pageRef.current, false);
-              }}
-              disabled={loadingMore}
-            >
-              Load More Templates
-            </Button>
-          </div>
-        )}
+          )}
 
-        {!pageInfo.hasNext && templates.length > 0 && (
-          <div className="text-center py-8">
-            <p className="text-gray-500">
-              {templates.length === 0
-                ? 'No templates found'
-                : `Showing all ${templates.length} templates`}
-            </p>
-          </div>
-        )}
+          {/* Collection Info Banner */}
+          {collection === 'ultra' && (
+            <div className="px-6 lg:px-12 py-3 bg-neutral-100 border-b border-neutral-200">
+              <p className="text-sm text-neutral-600 flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-neutral-500" />
+                Hand-picked premium templates curated by our team
+              </p>
+            </div>
+          )}
 
-        {!loading && templates.length === 0 && (
-          <div className="text-center py-12">
-            <p className="text-gray-500 text-lg">No templates found for the selected filters</p>
+          {/* Template Grid */}
+          <div className="px-6 lg:px-12 py-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
+              {templates.map((template) => (
+                <TemplateCard
+                  key={template.id}
+                  template={template}
+                  onPreview={setPreviewTemplate}
+                />
+              ))}
+            </div>
+
+            {/* Initial Loading */}
+            {loading && templates.length === 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8 mt-8">
+                {[...Array(6)].map((_, i) => (
+                  <div key={i} className="border border-neutral-200 bg-white">
+                    <Skeleton className="aspect-[16/10] rounded-none" />
+                    <div className="p-5 space-y-4">
+                      <Skeleton className="h-6 w-3/4 rounded-none" />
+                      <Skeleton className="h-4 w-1/2 rounded-none" />
+                      <Skeleton className="h-4 w-1/3 rounded-none" />
+                      <Skeleton className="h-10 w-full rounded-none mt-4" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Load More Loading */}
+            {loadingMore && (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8 mt-8">
+                {[...Array(3)].map((_, i) => (
+                  <div key={i} className="border border-neutral-200 bg-white">
+                    <Skeleton className="aspect-[16/10] rounded-none" />
+                    <div className="p-5 space-y-4">
+                      <Skeleton className="h-6 w-3/4 rounded-none" />
+                      <Skeleton className="h-4 w-1/2 rounded-none" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Load More Trigger */}
+            {pageInfo.hasNext && !loading && !loadingMore && templates.length > 0 && (
+              <div ref={loadMoreRef} className="py-12 flex flex-col items-center justify-center gap-4">
+                <div className="text-neutral-500 text-center">
+                  <Loader2 className="h-5 w-5 animate-spin mx-auto mb-3" />
+                  <span className="text-sm tracking-wide">Loading more templates...</span>
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => fetchTemplates(pageRef.current, false)}
+                  disabled={loadingMore}
+                  className="rounded-none border-neutral-300"
+                >
+                  Load More
+                </Button>
+              </div>
+            )}
+
+            {/* End of Results */}
+            {!pageInfo.hasNext && templates.length > 0 && (
+              <div className="text-center py-12 border-t border-neutral-200 mt-8">
+                <p className="text-neutral-500 text-sm tracking-wide">
+                  Showing all {templates.length} templates
+                </p>
+              </div>
+            )}
+
+            {/* No Results */}
+            {!loading && templates.length === 0 && (
+              <div className="text-center py-20">
+                <p className="text-neutral-500 text-lg">No templates found for the selected filters</p>
+                <Button
+                  variant="outline"
+                  className="mt-4 rounded-none"
+                  onClick={() => {
+                    setCollection('all');
+                    setSelectedTag({ slug: '', type: '' });
+                  }}
+                >
+                  View All Templates
+                </Button>
+              </div>
+            )}
           </div>
-        )}
+        </main>
       </div>
 
       {/* Template Preview Modal */}
