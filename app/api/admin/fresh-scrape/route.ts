@@ -29,11 +29,13 @@ async function runScraperPreflight() {
     error: null as string | null,
     mode: 'local' as 'local' | 'remote',
     syncBaseUrl: null as string | null,
+    publicUrl: null as string | null,
   };
 
   const sync = getScreenshotSyncConfig();
   storage.mode = sync.mode;
   storage.syncBaseUrl = sync.baseUrl;
+  storage.publicUrl = sync.baseUrl ? `${sync.baseUrl}/screenshots` : null;
 
   if (sync.enabled && sync.baseUrl && sync.token) {
     try {
@@ -47,10 +49,15 @@ async function runScraperPreflight() {
         });
         if (!res.ok) {
           const text = await res.text().catch(() => '');
+          if (res.status === 404) {
+            throw new Error(
+              'Remote preflight endpoint returned 404. Deploy the latest VPS build so `/api/admin/screenshots/upload` exists.'
+            );
+          }
           throw new Error(`Remote preflight failed (${res.status}): ${text || res.statusText}`);
         }
         const data = await res.json().catch(() => ({}));
-        storage.path = typeof data?.dir === 'string' ? data.dir : `${sync.baseUrl}/public/screenshots`;
+        storage.path = typeof data?.dir === 'string' ? data.dir : '/app/public/screenshots';
         storage.ok = !!data?.ok;
         storage.writable = !!data?.writable;
         if (!storage.ok) {
@@ -62,7 +69,7 @@ async function runScraperPreflight() {
     } catch (error) {
       storage.ok = false;
       storage.writable = false;
-      storage.path = `${sync.baseUrl}/public/screenshots`;
+      storage.path = '/app/public/screenshots';
       storage.error = error instanceof Error ? error.message : 'Remote storage check failed';
     }
   } else {

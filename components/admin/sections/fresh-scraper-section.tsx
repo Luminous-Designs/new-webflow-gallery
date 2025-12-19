@@ -132,6 +132,7 @@ interface PreflightResult {
     error: string | null;
     mode?: 'local' | 'remote';
     syncBaseUrl?: string | null;
+    publicUrl?: string | null;
   };
   supabase: {
     ok: boolean;
@@ -2605,7 +2606,11 @@ export function FreshScraperSection() {
             title="VPS Storage"
             icon={<Server className="h-4 w-4" />}
             ok={preflight ? preflight.storage.ok : null}
-            detail={preflight ? preflight.storage.path : 'public/screenshots'}
+            detail={
+              preflight
+                ? `${preflight.storage.path}${preflight.storage.publicUrl ? ` | Public: ${preflight.storage.publicUrl}` : ''}`
+                : 'Mount: public/screenshots | Public: /screenshots'
+            }
             secondary={
               preflight
                 ? `${preflight.storage.writable ? 'Writable' : 'Not writable'}${preflight.storage.mode === 'remote' ? ` | Sync: ${preflight.storage.syncBaseUrl || 'configured'}` : ''}`
