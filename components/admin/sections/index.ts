@@ -5,6 +5,7 @@ export { ScreenshotsSection } from './screenshots-section';
 export { SystemSection } from './system-section';
 export { AuthorsSection } from './authors-section';
 export { UltraFeaturedSection } from './ultra-featured-section';
+export { LogsSection } from './logs-section';
 export { VisitorsSection } from './visitors-section';
 export { PurchasesSection } from './purchases-section';
 export { SupabaseExplorerSection } from './supabase-explorer-section';

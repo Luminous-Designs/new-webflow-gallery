@@ -8,10 +8,7 @@ See `knowledge-base/12-18-25-architecture.md` for the source-of-truth architectu
 
 Key points:
 - Template metadata lives in **Supabase Postgres**.
-- Screenshots live on the **VPS filesystem** and are served from `https://templates.luminardigital.com/screenshots/...`.
-- The UI loads screenshots via `NEXT_PUBLIC_ASSET_BASE_URL` even on localhost.
-- The only supported scraper pipeline is **FreshScraper**.
-
+\\
 ## Commands
 
 ```bash

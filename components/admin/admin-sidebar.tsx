@@ -22,6 +22,7 @@ import {
   BarChart3,
   Settings,
   Ban,
+  History,
 } from 'lucide-react';
 
 export type AdminSection =
@@ -31,6 +32,7 @@ export type AdminSection =
   | 'screenshots'
   | 'authors'
   | 'ultra'
+  | 'logs'
   | 'system'
   | 'supabase-explorer'
   | 'visitors'
@@ -106,6 +108,11 @@ export function AdminSidebar({
       label: 'Analytics',
       icon: BarChart3,
       items: [
+        {
+          id: 'logs',
+          label: 'Logs',
+          icon: History,
+        },
         {
           id: 'visitors',
           label: 'Visitors',

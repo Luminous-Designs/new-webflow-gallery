@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import Image from 'next/image';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -110,6 +110,40 @@ interface SupabaseWriteState {
   failed: number;
   lastError: string | null;
   recent: Array<{ slug: string; status: string; error?: string }>;
+}
+
+interface TemplateConfirmation {
+  slug: string;
+  name: string;
+  supabaseStatus: 'queued' | 'saved' | 'failed';
+  supabaseError?: string;
+  screenshotPath: string | null;
+  screenshotSaved: boolean;
+  updatedAt: string;
+}
+
+interface PreflightResult {
+  ok: boolean;
+  checkedAt: string;
+  storage: {
+    ok: boolean;
+    path: string;
+    writable: boolean;
+    error: string | null;
+    mode?: 'local' | 'remote';
+    syncBaseUrl?: string | null;
+  };
+  supabase: {
+    ok: boolean;
+    readOk: boolean;
+    writeOk: boolean;
+    error: string | null;
+  };
+  browser: {
+    ok: boolean;
+    version: string | null;
+    error: string | null;
+  };
 }
 
 interface Screenshot {
@@ -608,6 +642,148 @@ function ActiveTemplateCard({ template }: { template: TemplatePhase }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function PreflightCheckTile({
+  title,
+  icon,
+  ok,
+  detail,
+  secondary,
+  error
+}: {
+  title: string;
+  icon: ReactNode;
+  ok: boolean | null;
+  detail?: string | null;
+  secondary?: string | null;
+  error?: string | null;
+}) {
+  const statusClass = ok === null
+    ? 'bg-slate-50 border-slate-200'
+    : ok
+      ? 'bg-green-50 border-green-200'
+      : 'bg-red-50 border-red-200';
+  const badgeClass = ok === null
+    ? 'bg-slate-100 text-slate-600'
+    : ok
+      ? 'bg-green-100 text-green-700 border-green-200'
+      : 'bg-red-100 text-red-700 border-red-200';
+  const statusLabel = ok === null ? 'Not checked' : ok ? 'OK' : 'Failed';
+
+  return (
+    <div className={`p-4 rounded-xl border ${statusClass}`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
+          <span className="text-gray-500">{icon}</span>
+          {title}
+        </div>
+        <Badge variant="outline" className={badgeClass}>{statusLabel}</Badge>
+      </div>
+      {detail && <div className="mt-2 text-xs text-gray-500 truncate" title={detail}>{detail}</div>}
+      {secondary && <div className="mt-1 text-xs text-gray-500">{secondary}</div>}
+      {error && <div className="mt-2 text-xs text-red-600">{error}</div>}
+    </div>
+  );
+}
+
+function TemplateConfirmationCard({ confirmations }: { confirmations: TemplateConfirmation[] }) {
+  const recent = confirmations.slice(0, 120);
+  const supabaseSaved = recent.filter(item => item.supabaseStatus === 'saved').length;
+  const supabaseQueued = recent.filter(item => item.supabaseStatus === 'queued').length;
+  const screenshotSaved = recent.filter(item => item.screenshotSaved).length;
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="font-semibold text-gray-800 flex items-center gap-2">
+          <CheckCircle className="h-5 w-5 text-emerald-600" />
+          Template Confirmations
+        </h3>
+        <div className="flex flex-wrap gap-2 justify-end">
+          <Badge variant="outline" className="bg-slate-50">
+            Recent: {recent.length}
+          </Badge>
+          <Badge variant="outline" className="bg-green-50 border-green-200 text-green-700">
+            Supabase ok: {supabaseSaved}
+          </Badge>
+          {supabaseQueued > 0 && (
+            <Badge variant="outline" className="bg-slate-100 border-slate-200 text-slate-600">
+              Supabase pending: {supabaseQueued}
+            </Badge>
+          )}
+          <Badge variant="outline" className="bg-blue-50 border-blue-200 text-blue-700">
+            Screenshots ok: {screenshotSaved}
+          </Badge>
+        </div>
+      </div>
+
+      <div className="border rounded-lg overflow-hidden">
+        <ScrollArea className="h-[260px]">
+          <div className="divide-y">
+            {recent.map(item => (
+              <div key={item.slug} className="px-3 py-2 text-sm">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="font-medium text-gray-800 truncate">{item.name || item.slug}</div>
+                    <div className="text-xs text-gray-500 truncate">{item.slug}</div>
+                  </div>
+                  <div className="flex items-center gap-4 shrink-0">
+                    <div className="flex items-center gap-1 text-xs">
+                      {item.supabaseStatus === 'saved' ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+                      ) : item.supabaseStatus === 'failed' ? (
+                        <XCircle className="h-3.5 w-3.5 text-red-600" />
+                      ) : (
+                        <Clock className="h-3.5 w-3.5 text-slate-500" />
+                      )}
+                      <span
+                        className={
+                          item.supabaseStatus === 'saved'
+                            ? 'text-green-700'
+                            : item.supabaseStatus === 'failed'
+                              ? 'text-red-700'
+                              : 'text-slate-600'
+                        }
+                      >
+                        Supabase
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 text-xs">
+                      {item.screenshotSaved ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-blue-600" />
+                      ) : (
+                        <XCircle className="h-3.5 w-3.5 text-red-600" />
+                      )}
+                      <span className={item.screenshotSaved ? 'text-blue-700' : 'text-red-700'}>
+                        Screenshot
+                      </span>
+                    </div>
+                    <span className="text-xs text-gray-400">
+                      {new Date(item.updatedAt).toLocaleTimeString()}
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-1 flex items-center justify-between gap-4 text-xs text-gray-500">
+                  <span className="truncate" title={item.screenshotPath || 'Screenshot missing'}>
+                    {item.screenshotPath || 'Screenshot missing'}
+                  </span>
+                  {item.supabaseError && (
+                    <span className="text-red-600 truncate" title={item.supabaseError}>
+                      {item.supabaseError}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+            {recent.length === 0 && (
+              <div className="p-6 text-center text-sm text-gray-500">No confirmations yet.</div>
+            )}
+          </div>
+        </ScrollArea>
+      </div>
+    </Card>
   );
 }
 
@@ -1293,6 +1469,10 @@ export function FreshScraperSection() {
   const [executorIsRunning, setExecutorIsRunning] = useState(false);
   const [executorProgress, setExecutorProgress] = useState<ExecutorProgress | null>(null);
   const [supabaseWriteState, setSupabaseWriteState] = useState<SupabaseWriteState | null>(null);
+  const [templateConfirmations, setTemplateConfirmations] = useState<TemplateConfirmation[]>([]);
+  const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
   const [newTemplateDiscovery, setNewTemplateDiscovery] = useState<NewTemplateDiscoveryState>({
     phase: 'idle',
     totalInSitemap: 0,
@@ -1363,6 +1543,12 @@ export function FreshScraperSection() {
   // Polling for active scrape
   const scrapeStateId = scrapeState?.id;
   const scrapeStateStatus = scrapeState?.status;
+
+  useEffect(() => {
+    if (!scrapeStateId) {
+      setTemplateConfirmations([]);
+    }
+  }, [scrapeStateId]);
 
   const mapScreenshotRow = (row: ScreenshotRow): Screenshot => ({
     id: row.id,
@@ -1470,14 +1656,15 @@ export function FreshScraperSection() {
 	          const events = await eventsResult.value.json();
 	          nextExecutorIsRunning = !!events.isRunning;
 	          nextExecutorProgress = (events.progress || null) as ExecutorProgress | null;
-	          setExecutorIsRunning(nextExecutorIsRunning);
-	          setExecutorProgress(nextExecutorProgress);
-	          setCurrentBatch(events.currentBatch || []);
-	          setLogs(events.logs || []);
-	          setSupabaseWriteState((events.supabase || null) as SupabaseWriteState | null);
-	          if (events.realTimeState) {
-	            setRealTimeState(events.realTimeState);
-	          }
+          setExecutorIsRunning(nextExecutorIsRunning);
+          setExecutorProgress(nextExecutorProgress);
+          setCurrentBatch(events.currentBatch || []);
+          setLogs(events.logs || []);
+          setSupabaseWriteState((events.supabase || null) as SupabaseWriteState | null);
+          setTemplateConfirmations((events.templateConfirmations || []) as TemplateConfirmation[]);
+          if (events.realTimeState) {
+            setRealTimeState(events.realTimeState);
+          }
 	        }
 
 	        // Calculate speed using persisted + in-flight progress (keeps chart live within a batch).
@@ -1586,6 +1773,45 @@ export function FreshScraperSection() {
     }
   };
 
+  const runPreflight = async (): Promise<boolean> => {
+    if (preflightLoading) return false;
+    setPreflightLoading(true);
+    setPreflightError(null);
+    try {
+      const response = await fetch('/api/admin/fresh-scrape?action=preflight', {
+        headers: { 'Authorization': `Bearer ${resolveAuthToken()}` }
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data?.error || 'Preflight checks failed');
+      }
+      const data = await response.json();
+      setPreflight(data);
+      if (data?.ok) {
+        toast.success('Preflight checks passed');
+      } else {
+        toast.error('Preflight checks failed');
+      }
+      return !!data?.ok;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to run preflight checks';
+      setPreflightError(message);
+      toast.error(message);
+      return false;
+    } finally {
+      setPreflightLoading(false);
+    }
+  };
+
+  const ensurePreflight = async (): Promise<boolean> => {
+    if (preflight?.ok) return true;
+    if (preflightLoading) {
+      toast.info('Preflight checks are already running.');
+      return false;
+    }
+    return runPreflight();
+  };
+
   const startMissingTemplateScrape = async () => {
     if (newTemplateDiscovery.toScrapeCount === 0) return;
     if (!confirm(`Scrape ${newTemplateDiscovery.toScrapeCount} template${newTemplateDiscovery.toScrapeCount === 1 ? '' : 's'} now? (missing: ${newTemplateDiscovery.missingCount}, updated: ${newTemplateDiscovery.updatedCount})`)) {
@@ -1593,6 +1819,8 @@ export function FreshScraperSection() {
     }
 
     try {
+      const ready = await ensurePreflight();
+      if (!ready) return;
       const response = await fetch('/api/admin/fresh-scrape', {
         method: 'POST',
         headers: {
@@ -1636,6 +1864,8 @@ export function FreshScraperSection() {
     }
 
     try {
+      const ready = await ensurePreflight();
+      if (!ready) return;
       const response = await fetch('/api/admin/fresh-scrape', {
         method: 'POST',
         headers: {
@@ -1673,6 +1903,8 @@ export function FreshScraperSection() {
     if (confirmText !== 'DELETE_ALL') return;
 
     try {
+      const ready = await ensurePreflight();
+      if (!ready) return;
       const response = await fetch('/api/admin/fresh-scrape', {
         method: 'POST',
         headers: {
@@ -1703,11 +1935,13 @@ export function FreshScraperSection() {
   };
 
   // Execute batches
-	  const executeBatches = async (state: FreshScrapeState) => {
-	    setIsExecuting(true);
+  const executeBatches = async (state: FreshScrapeState) => {
+    setIsExecuting(true);
 
-	    try {
-	      let urls: string[] = [];
+    try {
+      const ready = await ensurePreflight();
+      if (!ready) return;
+      let urls: string[] = [];
 	      const rawUrls: unknown = (state as unknown as { regular_template_urls?: unknown }).regular_template_urls;
 	      if (Array.isArray(rawUrls)) {
 	        urls = rawUrls.filter((u): u is string => typeof u === 'string');
@@ -1936,6 +2170,8 @@ export function FreshScraperSection() {
   // Begin scrape (manual start after discovery)
   const beginScrape = async () => {
     if (!scrapeState) return;
+    const ready = await ensurePreflight();
+    if (!ready) return;
     try {
       // Ensure backend has latest config before first batch
       await fetch('/api/admin/fresh-scrape', {
@@ -2219,6 +2455,8 @@ export function FreshScraperSection() {
           />
         </Card>
 
+        <TemplateConfirmationCard confirmations={templateConfirmations} />
+
         {/* Console Logs */}
         <Card className="p-6">
           <div className="flex items-center justify-between mb-4">
@@ -2308,6 +2546,93 @@ export function FreshScraperSection() {
           </div>
         </Card>
       )}
+
+      {/* Preflight Checks */}
+      <Card className="p-6 border border-slate-200 bg-white">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+              <Server className="h-5 w-5 text-slate-700" />
+              Preflight Checks
+            </h3>
+            <p className="text-sm text-gray-500">
+              Verify Supabase writes, VPS storage access, and screenshot browser health before scraping.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge
+              variant="outline"
+              className={
+                preflight
+                  ? preflight.ok
+                    ? 'bg-green-50 border-green-200 text-green-700'
+                    : 'bg-red-50 border-red-200 text-red-700'
+                  : 'bg-slate-100 border-slate-200 text-slate-600'
+              }
+            >
+              {preflight ? (preflight.ok ? 'All systems go' : 'Checks failed') : 'Not checked'}
+            </Badge>
+            <Button variant="outline" onClick={runPreflight} disabled={preflightLoading}>
+              {preflightLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Checking...
+                </>
+              ) : (
+                <>
+                  <Activity className="h-4 w-4 mr-2" />
+                  Run checks
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-3 text-xs text-gray-500">
+          {preflight?.checkedAt
+            ? `Last checked: ${new Date(preflight.checkedAt).toLocaleString()}`
+            : 'Run checks before starting any scraper mode.'}
+        </div>
+
+        {preflightError && (
+          <div className="mt-3 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+            {preflightError}
+          </div>
+        )}
+
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+          <PreflightCheckTile
+            title="VPS Storage"
+            icon={<Server className="h-4 w-4" />}
+            ok={preflight ? preflight.storage.ok : null}
+            detail={preflight ? preflight.storage.path : 'public/screenshots'}
+            secondary={
+              preflight
+                ? `${preflight.storage.writable ? 'Writable' : 'Not writable'}${preflight.storage.mode === 'remote' ? ` | Sync: ${preflight.storage.syncBaseUrl || 'configured'}` : ''}`
+                : null
+            }
+            error={preflight?.storage.error || null}
+          />
+          <PreflightCheckTile
+            title="Supabase"
+            icon={<Database className="h-4 w-4" />}
+            ok={preflight ? preflight.supabase.ok : null}
+            detail={
+              preflight
+                ? `Read: ${preflight.supabase.readOk ? 'ok' : 'fail'} | Write: ${preflight.supabase.writeOk ? 'ok' : 'fail'}`
+                : null
+            }
+            error={preflight?.supabase.error || null}
+          />
+          <PreflightCheckTile
+            title="Screenshot Browser"
+            icon={<Cpu className="h-4 w-4" />}
+            ok={preflight ? preflight.browser.ok : null}
+            detail={preflight?.browser.version ? `Chromium ${preflight.browser.version}` : null}
+            error={preflight?.browser.error || null}
+          />
+        </div>
+      </Card>
 
       {/* Incremental Scrape Card */}
       <Card className="p-8 border border-slate-200 bg-white">
@@ -2488,6 +2813,8 @@ export function FreshScraperSection() {
           </ScrollArea>
         </div>
       </Card>
+
+      <TemplateConfirmationCard confirmations={templateConfirmations} />
 
       {/* Check for Updates */}
       <Card className="p-6 border border-slate-200 bg-white">

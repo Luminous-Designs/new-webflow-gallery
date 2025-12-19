@@ -14,8 +14,8 @@ export interface SupabaseTemplateUpsertPayload {
     price: string | null;
     short_description: string | null;
     long_description: string | null;
-    screenshot_path: string | null;
-    screenshot_thumbnail_path: string | null;
+    screenshot_path?: string | null;
+    screenshot_thumbnail_path?: string | null;
     is_featured: boolean;
     is_cms: boolean;
     is_ecommerce: boolean;

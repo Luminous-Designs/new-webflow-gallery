@@ -75,6 +75,15 @@ interface ScraperEvents {
     isFeaturedAuthor: boolean;
     timestamp: string;
   }>;
+  templateConfirmations: Array<{
+    slug: string;
+    name: string;
+    supabaseStatus: 'queued' | 'saved' | 'failed';
+    supabaseError?: string;
+    screenshotPath: string | null;
+    screenshotSaved: boolean;
+    updatedAt: string;
+  }>;
   supabase: {
     queued: number;
     inFlight: boolean;
@@ -97,11 +106,45 @@ const scraperEvents: ScraperEvents = {
   logs: [],
   currentBatch: [],
   recentScreenshots: [],
+  templateConfirmations: [],
   supabase: null,
   progress: { processed: 0, successful: 0, failed: 0, total: 0 },
   realTimeState: null,
   scrapeState: null
 };
+
+const confirmationMap = new Map<string, ScraperEvents['templateConfirmations'][number]>();
+
+function upsertConfirmation(update: {
+  slug: string;
+  name: string;
+  supabaseStatus: 'queued' | 'saved' | 'failed';
+  supabaseError?: string;
+  screenshotPath?: string | null;
+}): void {
+  const existing = confirmationMap.get(update.slug);
+  const nextStatus =
+    update.supabaseStatus === 'queued' && existing && existing.supabaseStatus !== 'queued'
+      ? existing.supabaseStatus
+      : update.supabaseStatus;
+  const nextError = nextStatus === 'failed'
+    ? (update.supabaseStatus === 'failed' ? update.supabaseError : existing?.supabaseError)
+    : undefined;
+  const next = {
+    slug: update.slug,
+    name: update.name || existing?.name || update.slug,
+    supabaseStatus: nextStatus,
+    supabaseError: nextError,
+    screenshotPath: update.screenshotPath ?? existing?.screenshotPath ?? null,
+    screenshotSaved: Boolean(update.screenshotPath ?? existing?.screenshotPath),
+    updatedAt: new Date().toISOString()
+  };
+
+  confirmationMap.set(update.slug, next);
+  scraperEvents.templateConfirmations = Array.from(confirmationMap.values())
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, 200);
+}
 
 function addLog(level: string, message: string) {
   scraperEvents.logs.unshift({
@@ -186,6 +229,8 @@ export async function POST(request: NextRequest) {
         scraperEvents.logs = [];
         scraperEvents.currentBatch = [];
         scraperEvents.recentScreenshots = [];
+        scraperEvents.templateConfirmations = [];
+        confirmationMap.clear();
         scraperEvents.supabase = null;
         scraperEvents.progress = { processed: 0, successful: 0, failed: 0, total: batchUrls.length };
         scraperEvents.realTimeState = null;
@@ -207,18 +252,26 @@ export async function POST(request: NextRequest) {
           }
         });
 
-	        activeScraper.on('template-complete', (data) => {
+        activeScraper.on('template-complete', (data) => {
 	          const idx = scraperEvents.currentBatch.findIndex(t => t.url === data.url);
 	          if (idx >= 0) {
 	            scraperEvents.currentBatch[idx].phase = data.success ? 'completed' : 'failed';
 	            scraperEvents.currentBatch[idx].name = data.name;
 	          }
-	          const prev = scraperEvents.progress || { processed: 0, successful: 0, failed: 0, total: batchUrls.length };
-	          const processed = Math.min(prev.total, (prev.processed || 0) + 1);
-	          const successful = (prev.successful || 0) + (data.success ? 1 : 0);
-	          const failed = (prev.failed || 0) + (data.success ? 0 : 1);
-	          scraperEvents.progress = { ...prev, processed, successful, failed };
-	        });
+          const prev = scraperEvents.progress || { processed: 0, successful: 0, failed: 0, total: batchUrls.length };
+          const processed = Math.min(prev.total, (prev.processed || 0) + 1);
+          const successful = (prev.successful || 0) + (data.success ? 1 : 0);
+          const failed = (prev.failed || 0) + (data.success ? 0 : 1);
+          scraperEvents.progress = { ...prev, processed, successful, failed };
+
+          upsertConfirmation({
+            slug: data.slug,
+            name: data.name || data.slug,
+            supabaseStatus: data.success ? 'queued' : 'failed',
+            supabaseError: data.error,
+            screenshotPath: data.screenshotPath ?? null
+          });
+        });
 
         activeScraper.on('screenshot-captured', async (data) => {
           scraperEvents.recentScreenshots.unshift({
@@ -250,6 +303,16 @@ export async function POST(request: NextRequest) {
 
         activeScraper.on('supabase-state', (data) => {
           scraperEvents.supabase = data;
+          for (const item of data?.recent || []) {
+            if (item.status === 'queued' || item.status === 'saved' || item.status === 'failed') {
+              upsertConfirmation({
+                slug: item.slug,
+                name: item.slug,
+                supabaseStatus: item.status,
+                supabaseError: item.error
+              });
+            }
+          }
         });
 
         activeScraper.on('realtime-state', (data) => {
@@ -438,6 +501,7 @@ export async function GET(request: NextRequest) {
           logs: scraperEvents.logs.slice(0, 50),
           currentBatch: activeScraper?.getCurrentBatch() || scraperEvents.currentBatch,
           recentScreenshots: scraperEvents.recentScreenshots.slice(0, 30),
+          templateConfirmations: scraperEvents.templateConfirmations.slice(0, 150),
           supabase: supabaseState,
           progress: scraperEvents.progress,
           realTimeState: realState,

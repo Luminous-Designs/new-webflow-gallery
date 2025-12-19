@@ -4,6 +4,8 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import axios from 'axios';
 import { clampFreshScraperConfig } from '@/lib/scraper/fresh-scraper';
+import { chromium } from 'playwright';
+import { getScreenshotSyncConfig } from '@/lib/screenshot/sync';
 
 function safeJsonParse<T>(raw: unknown, fallback: T): T {
   if (raw === null || raw === undefined) return fallback;
@@ -17,6 +19,149 @@ function safeJsonParse<T>(raw: unknown, fallback: T): T {
     }
   }
   return fallback;
+}
+
+async function runScraperPreflight() {
+  const storage = {
+    ok: false,
+    path: '',
+    writable: false,
+    error: null as string | null,
+    mode: 'local' as 'local' | 'remote',
+    syncBaseUrl: null as string | null,
+  };
+
+  const sync = getScreenshotSyncConfig();
+  storage.mode = sync.mode;
+  storage.syncBaseUrl = sync.baseUrl;
+
+  if (sync.enabled && sync.baseUrl && sync.token) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10_000);
+      try {
+        const res = await fetch(`${sync.baseUrl}/api/admin/screenshots/upload?action=preflight`, {
+          headers: { Authorization: `Bearer ${sync.token}` },
+          signal: controller.signal,
+          cache: 'no-store',
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          throw new Error(`Remote preflight failed (${res.status}): ${text || res.statusText}`);
+        }
+        const data = await res.json().catch(() => ({}));
+        storage.path = typeof data?.dir === 'string' ? data.dir : `${sync.baseUrl}/public/screenshots`;
+        storage.ok = !!data?.ok;
+        storage.writable = !!data?.writable;
+        if (!storage.ok) {
+          storage.error = typeof data?.error === 'string' ? data.error : 'Remote preflight failed';
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } catch (error) {
+      storage.ok = false;
+      storage.writable = false;
+      storage.path = `${sync.baseUrl}/public/screenshots`;
+      storage.error = error instanceof Error ? error.message : 'Remote storage check failed';
+    }
+  } else {
+    const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
+    storage.path = screenshotDir;
+    try {
+      await fs.mkdir(screenshotDir, { recursive: true });
+      const testFile = path.join(screenshotDir, `.preflight-${Date.now()}.tmp`);
+      const payload = `preflight:${new Date().toISOString()}`;
+      await fs.writeFile(testFile, payload, 'utf8');
+      const readBack = await fs.readFile(testFile, 'utf8');
+      await fs.unlink(testFile);
+      if (readBack !== payload) {
+        throw new Error('Storage read/write mismatch');
+      }
+      storage.ok = true;
+      storage.writable = true;
+    } catch (error) {
+      storage.ok = false;
+      storage.writable = false;
+      storage.error = error instanceof Error ? error.message : 'Storage check failed';
+    }
+  }
+
+  const supabaseCheck = {
+    ok: false,
+    readOk: false,
+    writeOk: false,
+    error: null as string | null,
+  };
+
+  try {
+    const { error: readError } = await supabase
+      .from('templates')
+      .select('id')
+      .limit(1);
+    if (readError) throw readError;
+    supabaseCheck.readOk = true;
+
+    const { error: writeError } = await supabase
+      .from('supabase_activity_log')
+      .insert({
+        action_type: 'scraper_preflight',
+        table_name: 'templates',
+        record_count: 0,
+        details: { source: 'fresh_scraper_preflight' },
+        success: true,
+      });
+    if (writeError) throw writeError;
+    supabaseCheck.writeOk = true;
+    supabaseCheck.ok = true;
+  } catch (error) {
+    supabaseCheck.ok = false;
+    supabaseCheck.error = error instanceof Error ? error.message : 'Supabase check failed';
+  }
+
+  const browserCheck = {
+    ok: false,
+    version: null as string | null,
+    error: null as string | null,
+  };
+
+  try {
+    const browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+      ],
+    });
+    const context = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+    const page = await context.newPage();
+    await page.setContent('<html><body><h1>Scraper preflight</h1></body></html>');
+    const buffer = await page.screenshot({ type: 'jpeg', quality: 70 });
+    await page.close();
+    await context.close();
+    browserCheck.version = browser.version();
+    await browser.close();
+
+    if (!buffer || buffer.length < 5000) {
+      throw new Error('Browser screenshot too small');
+    }
+    browserCheck.ok = true;
+  } catch (error) {
+    browserCheck.ok = false;
+    browserCheck.error = error instanceof Error ? error.message : 'Browser check failed';
+  }
+
+  const ok = storage.ok && supabaseCheck.ok && browserCheck.ok;
+
+  return {
+    ok,
+    checkedAt: new Date().toISOString(),
+    storage,
+    supabase: supabaseCheck,
+    browser: browserCheck,
+  };
 }
 
 async function readJsonBody(
@@ -1012,6 +1157,11 @@ export async function GET(request: NextRequest) {
     const action = searchParams.get('action');
 
     switch (action) {
+      case 'preflight': {
+        const result = await runScraperPreflight();
+        return NextResponse.json(result);
+      }
+
       case 'status': {
         // Get current state
         const active = await getActiveFreshScrape();

@@ -6,6 +6,7 @@ import path from 'path';
 import { promises as fs } from 'fs';
 import { supabaseAdmin } from '@/lib/supabase';
 import { preparePageForScreenshot } from '@/lib/screenshot/prepare';
+import { getScreenshotSyncConfig, type ScreenshotSyncConfig } from '@/lib/screenshot/sync';
 import { detectHomepage } from './homepage-detector';
 import { SupabaseTemplateBatchWriter, type SupabaseWriteSnapshot } from './supabase-template-writer';
 
@@ -190,7 +191,7 @@ export interface ScrapeState {
 export interface FreshScraperEvents {
   'log': (data: { level: string; message: string }) => void;
   'template-phase': (data: { url: string; phase: string; elapsed: number }) => void;
-  'template-complete': (data: { url: string; name: string; slug: string; success: boolean; screenshotPath?: string }) => void;
+  'template-complete': (data: { url: string; name: string; slug: string; success: boolean; screenshotPath?: string; error?: string }) => void;
   'batch-start': (data: { batchIndex: number; batchSize: number; urls: string[] }) => void;
   'batch-complete': (data: { batchIndex: number; processed: number; successful: number; failed: number }) => void;
   'phase-change': (data: { phase: string; message: string }) => void;
@@ -319,6 +320,8 @@ export class FreshScraper extends EventEmitter {
   private pendingBrowserRecreation: boolean = false;
   private semaphore: Semaphore;
   private imageSemaphore: Semaphore;
+  private uploadSemaphore: Semaphore;
+  private screenshotSync: ScreenshotSyncConfig;
   private supabaseWriter: SupabaseTemplateBatchWriter;
 
   // Cached screenshot exclusions to avoid per-template DB queries
@@ -378,6 +381,8 @@ export class FreshScraper extends EventEmitter {
     this.jobMode = this.config.jobMode ?? 'full';
     this.semaphore = new Semaphore(this.config.concurrency);
     this.imageSemaphore = new Semaphore(this.getDesiredImageConcurrency());
+    this.uploadSemaphore = new Semaphore(this.getDesiredUploadConcurrency());
+    this.screenshotSync = getScreenshotSyncConfig();
     this.supabaseWriter = new SupabaseTemplateBatchWriter({
       batchSize: Math.max(5, Math.min(50, this.config.batchSize || 25)),
       flushIntervalMs: 750,
@@ -519,6 +524,11 @@ export class FreshScraper extends EventEmitter {
     return Math.min(cpuCount, Math.max(1, this.config.concurrency));
   }
 
+  private getDesiredUploadConcurrency(): number {
+    // Keep upload concurrency conservative to avoid saturating the VPS or local network.
+    return Math.max(1, Math.min(4, Math.trunc(this.config.concurrency)));
+  }
+
   private updateSharpConcurrency(): void {
     const cpuCount = Math.max(1, os.cpus().length);
     const envCap = parseInt(
@@ -531,6 +541,51 @@ export class FreshScraper extends EventEmitter {
       ? Math.min(envCap, cpuCount)
       : Math.min(cpuCount, Math.max(1, this.config.concurrency));
     sharp.concurrency(desired);
+  }
+
+  private async syncScreenshotToVps(slug: string, localFilePath: string, publicPath: string): Promise<boolean> {
+    // In production, screenshots should be written directly to the mounted filesystem.
+    if (!this.screenshotSync.enabled || !this.screenshotSync.baseUrl || !this.screenshotSync.token) {
+      return true;
+    }
+
+    await this.uploadSemaphore.acquire();
+    try {
+      const buffer = await fs.readFile(localFilePath);
+      if (!buffer.length) throw new Error('Local screenshot file is empty');
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30_000);
+      try {
+        const url = `${this.screenshotSync.baseUrl}/api/admin/screenshots/upload?slug=${encodeURIComponent(slug)}`;
+        const body = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.screenshotSync.token}`,
+            'Content-Type': 'image/webp',
+          },
+          body,
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          throw new Error(`Upload failed (${res.status}): ${text || res.statusText}`);
+        }
+
+        this.log('info', `[sync] Uploaded ${publicPath} to ${this.screenshotSync.baseUrl}`);
+        return true;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      this.log('error', `[sync] Screenshot upload failed for ${slug}: ${errorMsg}`);
+      return false;
+    } finally {
+      this.uploadSemaphore.release();
+    }
   }
 
   private async getScreenshotExclusionSelectors(forceRefresh: boolean = false): Promise<string[]> {
@@ -750,6 +805,7 @@ export class FreshScraper extends EventEmitter {
     if (sanitized.concurrency !== undefined && sanitized.concurrency !== oldConcurrency) {
       this.semaphore.setPermits(sanitized.concurrency);
       this.imageSemaphore.setPermits(this.getDesiredImageConcurrency());
+      this.uploadSemaphore.setPermits(this.getDesiredUploadConcurrency());
       this.updateSharpConcurrency();
     }
 
@@ -1102,7 +1158,8 @@ export class FreshScraper extends EventEmitter {
               url,
               name: browserResult.slug,
               slug: browserResult.slug,
-              success: false
+              success: false,
+              error: errorMsg
             });
           }
         } else {
@@ -1117,7 +1174,8 @@ export class FreshScraper extends EventEmitter {
             url,
             name: browserResult.slug,
             slug: browserResult.slug,
-            success: false
+            success: false,
+            error: browserResult.error
           });
 
           if (this.shouldAutoPause()) {
@@ -1600,19 +1658,43 @@ export class FreshScraper extends EventEmitter {
         const screenshotFullPath = path.join(process.cwd(), 'public', 'screenshots', screenshotFilename);
 
 	        const screenshotWebpQuality = Math.min(100, Math.max(1, this.config.screenshotWebpQuality));
-	        await sharp(result.screenshotBuffer)
-	          .resize(MAX_SCREENSHOT_WIDTH, MAX_SCREENSHOT_HEIGHT, {
-	            withoutEnlargement: true,
-	            fit: 'inside'
-	          })
-	          .webp({ quality: screenshotWebpQuality })
-	          .toFile(screenshotFullPath);
+        await sharp(result.screenshotBuffer)
+          .resize(MAX_SCREENSHOT_WIDTH, MAX_SCREENSHOT_HEIGHT, {
+            withoutEnlargement: true,
+            fit: 'inside'
+          })
+          .webp({ quality: screenshotWebpQuality })
+          .toFile(screenshotFullPath);
+
+        const stats = await fs.stat(screenshotFullPath);
+        if (!stats.size || stats.size < 10_000) {
+          this.log('warn', `Screenshot file too small for ${slug} (${stats.size} bytes)`);
+          try {
+            await fs.unlink(screenshotFullPath);
+          } catch {
+            // Ignore cleanup errors
+          }
+          screenshotPath = null;
+        } else {
+          this.log('info', `Screenshot saved for ${slug} → ${screenshotPath} (${stats.size} bytes)`);
+        }
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error';
         this.log('warn', `Image processing failed for ${slug}: ${errorMsg}`);
         screenshotPath = null;
       } finally {
         this.imageSemaphore.release();
+      }
+    } else {
+      this.log('warn', `No screenshot captured for ${slug}`);
+    }
+
+    if (screenshotPath) {
+      const screenshotFullPath = path.join(process.cwd(), 'public', 'screenshots', `${slug}.webp`);
+      const synced = await this.syncScreenshotToVps(slug, screenshotFullPath, screenshotPath);
+      if (!synced) {
+        // If the UI loads screenshots from the VPS asset domain, a failed sync would lead to persistent 404s.
+        screenshotPath = null;
       }
     }
 
@@ -1662,7 +1744,7 @@ export class FreshScraper extends EventEmitter {
         price: data.price || null,
         short_description: data.shortDescription || null,
         long_description: data.longDescription || null,
-        screenshot_path: screenshotPath,
+        ...(screenshotPath ? { screenshot_path: screenshotPath } : {}),
         screenshot_thumbnail_path: null,
         is_featured: result.isFeaturedAuthor,
         is_cms: data.isCms,

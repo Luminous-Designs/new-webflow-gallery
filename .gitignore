@@ -74,6 +74,8 @@ logs
 *.log
 lerna-debug.log*
 .pnpm-debug.log*
+!app/api/admin/logs/
+!app/api/admin/logs/route.ts
 
 # Runtime data
 pids

@@ -9,6 +9,7 @@ import {
   SystemSection,
   AuthorsSection,
   UltraFeaturedSection,
+  LogsSection,
   VisitorsSection,
   PurchasesSection,
   SupabaseExplorerSection
@@ -30,6 +31,8 @@ function AdminDashboard() {
         return <AuthorsSection />;
       case 'ultra':
         return <UltraFeaturedSection />;
+      case 'logs':
+        return <LogsSection />;
       case 'visitors':
         return <VisitorsSection />;
       case 'purchases':
