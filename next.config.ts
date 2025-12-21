@@ -23,6 +23,10 @@ const nextConfig: NextConfig = {
         protocol: 'https',
         hostname: 'templates.luminardigital.com',
       },
+      {
+        protocol: 'https',
+        hostname: 'screenshots.luminardigital.com',
+      },
     ],
   },
   webpack: (config) => {

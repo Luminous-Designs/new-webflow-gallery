@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin as supabase } from '@/lib/supabase';
-import { promises as fs } from 'fs';
-import path from 'path';
 import axios from 'axios';
 import { clampFreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 import { chromium } from 'playwright';
-import { getScreenshotSyncConfig } from '@/lib/screenshot/sync';
+import { isR2Configured, getR2Config } from '@/lib/r2';
 
 function safeJsonParse<T>(raw: unknown, fallback: T): T {
   if (raw === null || raw === undefined) return fallback;
@@ -22,76 +20,18 @@ function safeJsonParse<T>(raw: unknown, fallback: T): T {
 }
 
 async function runScraperPreflight() {
+  // Check R2 storage configuration
+  const r2Config = getR2Config();
   const storage = {
-    ok: false,
-    path: '',
-    writable: false,
+    ok: isR2Configured(),
+    mode: 'r2' as const,
+    publicUrl: r2Config.publicUrl,
+    bucketName: r2Config.bucketName,
     error: null as string | null,
-    mode: 'local' as 'local' | 'remote',
-    syncBaseUrl: null as string | null,
-    publicUrl: null as string | null,
   };
 
-  const sync = getScreenshotSyncConfig();
-  storage.mode = sync.mode;
-  storage.syncBaseUrl = sync.baseUrl;
-  storage.publicUrl = sync.baseUrl ? `${sync.baseUrl}/screenshots` : null;
-
-  if (sync.enabled && sync.baseUrl && sync.token) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10_000);
-      try {
-        const res = await fetch(`${sync.baseUrl}/api/admin/screenshots/upload?action=preflight`, {
-          headers: { Authorization: `Bearer ${sync.token}` },
-          signal: controller.signal,
-          cache: 'no-store',
-        });
-        if (!res.ok) {
-          const text = await res.text().catch(() => '');
-          if (res.status === 404) {
-            throw new Error(
-              'Remote preflight endpoint returned 404. Deploy the latest VPS build so `/api/admin/screenshots/upload` exists.'
-            );
-          }
-          throw new Error(`Remote preflight failed (${res.status}): ${text || res.statusText}`);
-        }
-        const data = await res.json().catch(() => ({}));
-        storage.path = typeof data?.dir === 'string' ? data.dir : '/app/public/screenshots';
-        storage.ok = !!data?.ok;
-        storage.writable = !!data?.writable;
-        if (!storage.ok) {
-          storage.error = typeof data?.error === 'string' ? data.error : 'Remote preflight failed';
-        }
-      } finally {
-        clearTimeout(timeoutId);
-      }
-    } catch (error) {
-      storage.ok = false;
-      storage.writable = false;
-      storage.path = '/app/public/screenshots';
-      storage.error = error instanceof Error ? error.message : 'Remote storage check failed';
-    }
-  } else {
-    const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
-    storage.path = screenshotDir;
-    try {
-      await fs.mkdir(screenshotDir, { recursive: true });
-      const testFile = path.join(screenshotDir, `.preflight-${Date.now()}.tmp`);
-      const payload = `preflight:${new Date().toISOString()}`;
-      await fs.writeFile(testFile, payload, 'utf8');
-      const readBack = await fs.readFile(testFile, 'utf8');
-      await fs.unlink(testFile);
-      if (readBack !== payload) {
-        throw new Error('Storage read/write mismatch');
-      }
-      storage.ok = true;
-      storage.writable = true;
-    } catch (error) {
-      storage.ok = false;
-      storage.writable = false;
-      storage.error = error instanceof Error ? error.message : 'Storage check failed';
-    }
+  if (!storage.ok) {
+    storage.error = 'R2 is not configured. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, and R2_PUBLIC_URL environment variables.';
   }
 
   const supabaseCheck = {
@@ -407,29 +347,10 @@ async function fetchAllStorefrontUrlsFromDatabase(): Promise<string[]> {
   return urls;
 }
 
-async function wipeLocalScreenshots(): Promise<{ screenshotsDeleted: number }> {
-  let screenshotsDeleted = 0;
-
-  const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
-
-  try {
-    const screenshotFiles = await fs.readdir(screenshotDir);
-    for (const file of screenshotFiles) {
-      if (file.endsWith('.webp') || file.endsWith('.jpg') || file.endsWith('.jpeg') || file.endsWith('.png')) {
-        await fs.unlink(path.join(screenshotDir, file));
-        screenshotsDeleted++;
-      }
-    }
-  } catch {
-    // Directory may not exist
-  }
-  return { screenshotsDeleted };
-}
-
-// Helper to delete all template data and files
-async function deleteAllData(): Promise<{ templatesDeleted: number; screenshotsDeleted: number }> {
+// Helper to delete all template data
+// Note: Screenshots in R2 are NOT deleted - they can be orphaned and cleaned up separately if needed
+async function deleteAllData(): Promise<{ templatesDeleted: number }> {
   let templatesDeleted = 0;
-  let screenshotsDeleted = 0;
 
   // Count templates before deletion
   const { count } = await supabase
@@ -498,10 +419,7 @@ async function deleteAllData(): Promise<{ templatesDeleted: number; screenshotsD
     await supabase.from('fresh_scrape_screenshots').delete().neq('id', 0);
   }
 
-  const wiped = await wipeLocalScreenshots();
-  screenshotsDeleted = wiped.screenshotsDeleted;
-
-  return { templatesDeleted, screenshotsDeleted };
+  return { templatesDeleted };
 }
 
 // POST handler
@@ -595,16 +513,7 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        const wipe = body.wipeImages === true;
-        if (wipe) {
-          const confirm = typeof body.confirm === 'string' ? body.confirm : '';
-          if (confirm !== 'WIPE_SCREENSHOTS' && confirm !== 'WIPE_IMAGES') {
-            return NextResponse.json(
-              { error: 'Confirmation required. Send { action: \"start_rescreenshot_all\", wipeImages: true, confirm: \"WIPE_SCREENSHOTS\" } to proceed.' },
-              { status: 400 }
-            );
-          }
-        }
+        // Note: wipeImages option removed - screenshots are stored in R2 and will be overwritten during re-scrape
 
         const baseConfig: FreshScrapeConfig = {
           concurrency: 5,
@@ -628,7 +537,6 @@ export async function POST(request: NextRequest) {
           ...(config ? (clampFreshScraperConfig(config) as Partial<FreshScrapeConfig>) : {})
         };
 
-        const wiped = wipe ? await wipeLocalScreenshots() : { screenshotsDeleted: 0 };
         const urlsToScrape = await fetchAllStorefrontUrlsFromDatabase();
 
         const { data: state, error: insertError } = await supabase
@@ -649,7 +557,6 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({
           message: 'Rescreenshot-all initialized',
-          wiped: wiped,
           state
         });
       }

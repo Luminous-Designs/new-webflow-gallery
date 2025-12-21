@@ -2,11 +2,9 @@ import { EventEmitter } from 'events';
 import { chromium, Browser, BrowserContext, Page, Route } from 'playwright';
 import sharp from 'sharp';
 import os from 'os';
-import path from 'path';
-import { promises as fs } from 'fs';
 import { supabaseAdmin } from '@/lib/supabase';
 import { preparePageForScreenshot } from '@/lib/screenshot/prepare';
-import { getScreenshotSyncConfig, type ScreenshotSyncConfig } from '@/lib/screenshot/sync';
+import { uploadScreenshotToR2, isR2Configured } from '@/lib/r2';
 import { detectHomepage } from './homepage-detector';
 import { SupabaseTemplateBatchWriter, type SupabaseWriteSnapshot } from './supabase-template-writer';
 
@@ -321,7 +319,6 @@ export class FreshScraper extends EventEmitter {
   private semaphore: Semaphore;
   private imageSemaphore: Semaphore;
   private uploadSemaphore: Semaphore;
-  private screenshotSync: ScreenshotSyncConfig;
   private supabaseWriter: SupabaseTemplateBatchWriter;
 
   // Cached screenshot exclusions to avoid per-template DB queries
@@ -382,7 +379,6 @@ export class FreshScraper extends EventEmitter {
     this.semaphore = new Semaphore(this.config.concurrency);
     this.imageSemaphore = new Semaphore(this.getDesiredImageConcurrency());
     this.uploadSemaphore = new Semaphore(this.getDesiredUploadConcurrency());
-    this.screenshotSync = getScreenshotSyncConfig();
     this.supabaseWriter = new SupabaseTemplateBatchWriter({
       batchSize: Math.max(5, Math.min(50, this.config.batchSize || 25)),
       flushIntervalMs: 750,
@@ -409,10 +405,10 @@ export class FreshScraper extends EventEmitter {
   }
 
   async init(restoreState: boolean = false): Promise<void> {
-    // Ensure directories exist
-    const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
-
-    await fs.mkdir(screenshotDir, { recursive: true });
+    // Check R2 configuration
+    if (!isR2Configured()) {
+      throw new Error('R2 is not configured. Cannot initialize scraper without R2 storage.');
+    }
 
     if (restoreState) {
       this.log('warn', 'restoreState requested, but FreshScraper no longer persists local state.');
@@ -543,46 +539,21 @@ export class FreshScraper extends EventEmitter {
     sharp.concurrency(desired);
   }
 
-  private async syncScreenshotToVps(slug: string, localFilePath: string, publicPath: string): Promise<boolean> {
-    // In production, screenshots should be written directly to the mounted filesystem.
-    if (!this.screenshotSync.enabled || !this.screenshotSync.baseUrl || !this.screenshotSync.token) {
-      return true;
+  private async uploadScreenshotToR2Storage(slug: string, buffer: Buffer): Promise<string | null> {
+    if (!isR2Configured()) {
+      this.log('error', `[R2] R2 is not configured. Cannot upload screenshot for ${slug}`);
+      return null;
     }
 
     await this.uploadSemaphore.acquire();
     try {
-      const buffer = await fs.readFile(localFilePath);
-      if (!buffer.length) throw new Error('Local screenshot file is empty');
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30_000);
-      try {
-        const url = `${this.screenshotSync.baseUrl}/api/admin/screenshots/upload?slug=${encodeURIComponent(slug)}`;
-        const body = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${this.screenshotSync.token}`,
-            'Content-Type': 'image/webp',
-          },
-          body,
-          signal: controller.signal,
-        });
-
-        if (!res.ok) {
-          const text = await res.text().catch(() => '');
-          throw new Error(`Upload failed (${res.status}): ${text || res.statusText}`);
-        }
-
-        this.log('info', `[sync] Uploaded ${publicPath} to ${this.screenshotSync.baseUrl}`);
-        return true;
-      } finally {
-        clearTimeout(timeoutId);
-      }
+      const publicUrl = await uploadScreenshotToR2(slug, buffer);
+      this.log('info', `[R2] Uploaded screenshot for ${slug} → ${publicUrl}`);
+      return publicUrl;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      this.log('error', `[sync] Screenshot upload failed for ${slug}: ${errorMsg}`);
-      return false;
+      this.log('error', `[R2] Screenshot upload failed for ${slug}: ${errorMsg}`);
+      return null;
     } finally {
       this.uploadSemaphore.release();
     }
@@ -1653,30 +1624,27 @@ export class FreshScraper extends EventEmitter {
       this.updatePhase(batchIndex, 'processing_screenshot');
       await this.imageSemaphore.acquire();
       try {
-        const screenshotFilename = `${slug}.webp`;
-        screenshotPath = `/screenshots/${screenshotFilename}`;
-        const screenshotFullPath = path.join(process.cwd(), 'public', 'screenshots', screenshotFilename);
+        const screenshotWebpQuality = Math.min(100, Math.max(1, this.config.screenshotWebpQuality));
 
-	        const screenshotWebpQuality = Math.min(100, Math.max(1, this.config.screenshotWebpQuality));
-        await sharp(result.screenshotBuffer)
+        // Process image in memory (no local filesystem)
+        const processedBuffer = await sharp(result.screenshotBuffer)
           .resize(MAX_SCREENSHOT_WIDTH, MAX_SCREENSHOT_HEIGHT, {
             withoutEnlargement: true,
             fit: 'inside'
           })
           .webp({ quality: screenshotWebpQuality })
-          .toFile(screenshotFullPath);
+          .toBuffer();
 
-        const stats = await fs.stat(screenshotFullPath);
-        if (!stats.size || stats.size < 10_000) {
-          this.log('warn', `Screenshot file too small for ${slug} (${stats.size} bytes)`);
-          try {
-            await fs.unlink(screenshotFullPath);
-          } catch {
-            // Ignore cleanup errors
-          }
-          screenshotPath = null;
+        if (!processedBuffer.length || processedBuffer.length < 10_000) {
+          this.log('warn', `Screenshot buffer too small for ${slug} (${processedBuffer.length} bytes)`);
         } else {
-          this.log('info', `Screenshot saved for ${slug} → ${screenshotPath} (${stats.size} bytes)`);
+          // Upload directly to R2
+          const r2Url = await this.uploadScreenshotToR2Storage(slug, processedBuffer);
+          if (r2Url) {
+            // Store the R2 public URL as the screenshot path
+            screenshotPath = r2Url;
+            this.log('info', `Screenshot uploaded for ${slug} → ${screenshotPath} (${processedBuffer.length} bytes)`);
+          }
         }
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error';
@@ -1687,15 +1655,6 @@ export class FreshScraper extends EventEmitter {
       }
     } else {
       this.log('warn', `No screenshot captured for ${slug}`);
-    }
-
-    if (screenshotPath) {
-      const screenshotFullPath = path.join(process.cwd(), 'public', 'screenshots', `${slug}.webp`);
-      const synced = await this.syncScreenshotToVps(slug, screenshotFullPath, screenshotPath);
-      if (!synced) {
-        // If the UI loads screenshots from the VPS asset domain, a failed sync would lead to persistent 404s.
-        screenshotPath = null;
-      }
     }
 
     this.updatePhase(batchIndex, 'saving');
