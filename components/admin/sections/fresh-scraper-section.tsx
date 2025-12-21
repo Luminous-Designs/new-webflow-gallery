@@ -127,12 +127,11 @@ interface PreflightResult {
   checkedAt: string;
   storage: {
     ok: boolean;
-    path: string;
+    mode: 'r2';
+    publicUrl: string | null;
+    bucketName: string | null;
     writable: boolean;
     error: string | null;
-    mode?: 'local' | 'remote';
-    syncBaseUrl?: string | null;
-    publicUrl?: string | null;
   };
   supabase: {
     ok: boolean;
@@ -2557,7 +2556,7 @@ export function FreshScraperSection() {
               Preflight Checks
             </h3>
             <p className="text-sm text-gray-500">
-              Verify Supabase writes, VPS storage access, and screenshot browser health before scraping.
+              Verify Supabase writes, R2 storage access, and screenshot browser health before scraping.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -2603,17 +2602,17 @@ export function FreshScraperSection() {
 
         <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
           <PreflightCheckTile
-            title="VPS Storage"
+            title="R2 Storage"
             icon={<Server className="h-4 w-4" />}
             ok={preflight ? preflight.storage.ok : null}
             detail={
               preflight
-                ? `${preflight.storage.path}${preflight.storage.publicUrl ? ` | Public: ${preflight.storage.publicUrl}` : ''}`
-                : 'Mount: public/screenshots | Public: /screenshots'
+                ? `Bucket: ${preflight.storage.bucketName || 'not set'}${preflight.storage.publicUrl ? ` | URL: ${preflight.storage.publicUrl}` : ''}`
+                : 'Cloudflare R2 bucket for screenshots'
             }
             secondary={
               preflight
-                ? `${preflight.storage.writable ? 'Writable' : 'Not writable'}${preflight.storage.mode === 'remote' ? ` | Sync: ${preflight.storage.syncBaseUrl || 'configured'}` : ''}`
+                ? `${preflight.storage.writable ? 'Write OK' : 'Write failed'}`
                 : null
             }
             error={preflight?.storage.error || null}
@@ -2650,7 +2649,7 @@ export function FreshScraperSection() {
               <h1 className="text-2xl font-bold text-gray-900">Incremental Update Scrape</h1>
               <p className="text-sm text-gray-600 mt-1">
                 No destructive deletes. This checks the Webflow sitemap for missing/updated templates and pushes updates into Supabase in batches.
-                Screenshots are saved to the server filesystem (typically a persistent mount in production) and served from the VPS domain.
+                Screenshots are uploaded directly to Cloudflare R2 and served from the R2 public domain.
               </p>
               <div className="mt-4 flex flex-col sm:flex-row gap-2">
                 <Button variant="outline" onClick={checkForNewTemplates} disabled={newTemplateDiscovery.phase === 'checking'}>
@@ -2695,7 +2694,7 @@ export function FreshScraperSection() {
             <div className="flex-1">
               <h2 className="text-2xl font-bold text-gray-900">Maintenance / Destructive</h2>
               <p className="text-sm text-gray-600 mt-1">
-                Run these only on the VPS deployment where `public/screenshots` is backed by the persistent mounts.
+                These operations clear database records. Screenshots in R2 are overwritten during re-scrape.
               </p>
               <div className="mt-4 flex flex-col sm:flex-row gap-2">
                 <Button
@@ -2716,7 +2715,7 @@ export function FreshScraperSection() {
                 </Button>
               </div>
               <div className="mt-3 text-xs text-gray-500">
-                Images are always loaded from the VPS domain in both localhost and production; local `public/` images are intentionally ignored.
+                Images are loaded from Cloudflare R2 (screenshots.luminardigital.com) in both localhost and production.
               </div>
             </div>
           </div>

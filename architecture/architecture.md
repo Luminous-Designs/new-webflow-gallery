@@ -50,6 +50,7 @@ For **Session Logs**, include:
 - Next.js 15.5.3 (App Router) + React 19.1.0 + TypeScript 5.9
 - Tailwind CSS 4
 - Supabase Postgres (`@supabase/supabase-js` 2.88) for template metadata + admin state tables
+- Cloudflare R2 (`@aws-sdk/client-s3` 3.x) for screenshot storage
 - Playwright 1.55 for scraping/screenshot capture (Chromium)
 - Sharp 0.34 for image processing (WebP output)
 
@@ -61,9 +62,8 @@ For **Session Logs**, include:
 │   └── api/
 │       ├── templates/route.ts    # Gallery read API (Supabase)
 │       └── admin/
-│           ├── fresh-scrape/route.ts          # Scrape planner/state + preflight
+│           ├── fresh-scrape/route.ts          # Scrape planner/state + preflight (R2 check)
 │           ├── fresh-scrape/execute/route.ts  # Scrape executor (batch runner)
-│           ├── screenshots/upload/route.ts    # VPS screenshot upload API (for localhost scrapes)
 │           ├── logs/route.ts                  # Logs page API (recent templates)
 │           ├── featured-authors/route.ts      # Featured authors admin
 │           └── ultra-featured/*               # Ultra-featured templates admin
@@ -71,16 +71,16 @@ For **Session Logs**, include:
 │   ├── template-gallery.tsx      # Public gallery UI
 │   └── admin/sections/
 │       ├── fresh-scraper-section.tsx          # Scraper UI (preflight + confirmations)
-│       ├── logs-section.tsx                   # Admin “Logs” UI
+│       ├── logs-section.tsx                   # Admin "Logs" UI
 │       ├── authors-section.tsx                # Featured authors UI
 │       └── ultra-featured-section.tsx         # Ultra-featured UI (optimized)
 ├── lib/
-│   ├── assets.ts                 # `toAssetUrl()` normalizes `/screenshots/*` → VPS domain
-│   ├── scraper/fresh-scraper.ts  # Playwright scraper + screenshot pipeline
+│   ├── assets.ts                 # `toAssetUrl()` normalizes paths → R2 public URL
+│   ├── r2.ts                     # Cloudflare R2 upload utilities (S3-compatible API)
+│   ├── scraper/fresh-scraper.ts  # Playwright scraper + screenshot pipeline (uploads to R2)
 │   ├── scraper/supabase-template-writer.ts    # Batched Supabase upserts
 │   └── screenshot/
-│       ├── prepare.ts            # Page prep before screenshot
-│       └── sync.ts               # Screenshot sync config (localhost → VPS)
+│       └── prepare.ts            # Page prep before screenshot
 └── knowledge-base/               # Human docs; see 12-18-25-architecture.md
 ```
 
@@ -94,15 +94,17 @@ For **Session Logs**, include:
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY` (public read key)
 - `SUPABASE_SERVICE_ROLE_KEY` (server-side admin key; required for scraper + admin writes)
 - `ADMIN_PASSWORD` (bearer token for admin API routes)
-- `NEXT_PUBLIC_ASSET_BASE_URL` (screenshot CDN/asset host; default `https://templates.luminardigital.com`)
 
-Screenshot sync (only needed when scraping on localhost while assets live on the VPS):
-- `SCREENSHOT_SYNC_BASE_URL` (recommended) → e.g. `https://templates.luminardigital.com`
-- `SCREENSHOT_SYNC_TOKEN` (optional) → bearer for VPS upload; defaults to `ADMIN_PASSWORD` if unset
+Cloudflare R2 (required for screenshot storage):
+- `R2_ACCOUNT_ID` (Cloudflare account ID)
+- `R2_ACCESS_KEY_ID` (R2 API token access key)
+- `R2_SECRET_ACCESS_KEY` (R2 API token secret key)
+- `R2_BUCKET_NAME` (R2 bucket name, e.g. `webflow-screenshots`)
+- `R2_PUBLIC_URL` (public URL for screenshots, e.g. `https://screenshots.luminardigital.com`)
 
 ### Database Schema
 Core:
-- `templates` (template metadata; `screenshot_path` is `/screenshots/{slug}.webp`, `author_id`, `author_name`, etc.)
+- `templates` (template metadata; `screenshot_path` stores full R2 URL like `https://screenshots.luminardigital.com/slug.webp`)
 - `featured_authors` (authors marked featured; drives template ordering)
 - `ultra_featured_templates` (templates explicitly “Ultra Featured”)
 
@@ -120,12 +122,13 @@ Operational:
 - Scraper is split:
   - Planner/state: `POST /api/admin/fresh-scrape` (+ `GET` for status/progress/screenshots/preflight)
   - Executor: `POST /api/admin/fresh-scrape/execute` (+ `GET ?action=events` for polling)
-- Screenshot upload (for localhost scrapes): `POST /api/admin/screenshots/upload?slug=...` (VPS side)
+- Screenshots are uploaded directly to R2 during scraping (no sync needed)
 
 ### Key Dependencies
 - `playwright`: browser automation + screenshot capture
 - `sharp`: image conversion/resizing to WebP; tuned for memory efficiency
 - `@supabase/supabase-js`: Supabase reads/writes (service role used server-side)
+- `@aws-sdk/client-s3`: R2 uploads via S3-compatible API
 - `sonner`: toast notifications in admin UI
 
 ### Frontend Architecture
@@ -134,23 +137,38 @@ Operational:
 - Scraper UI polls executor events every ~2s and lazily renders screenshot feed/windowed UI to avoid memory spikes
 
 ### Deployment
-- Production runs on a VPS (Coolify) and serves screenshots as static files at:
-  - `https://templates.luminardigital.com/screenshots/{slug}.webp`
-- Required Coolify mount:
-  - Host: `/data/webflow-gallery/screenshots` → Container: `/app/public/screenshots`
-- Thumbnails mount is deprecated (do not use).
+- Production runs on Vercel (or any Node.js host)
+- Screenshots are stored in Cloudflare R2 and served via custom domain:
+  - `https://screenshots.luminardigital.com/{slug}.webp`
+- No filesystem mounts required - all screenshots go directly to R2
 
 ### Known Gotchas
-- The UI intentionally loads screenshots from the VPS asset domain even on localhost (single source of truth).
-  - If you run the scraper on localhost without screenshot sync, you’ll update Supabase paths but the VPS won’t have the files → 404s.
-  - Fix: deploy the upload endpoint and set `SCREENSHOT_SYNC_BASE_URL` (+ `SCREENSHOT_SYNC_TOKEN` if needed).
-- `fresh_scrape_screenshots.screenshot_thumbnail_path` stores the full screenshot path (legacy column name).
+- Screenshots are stored in R2 and loaded from the R2 public URL in both localhost and production.
+- The scraper uploads directly to R2, so it works identically on localhost and production (no sync needed).
+- `fresh_scrape_screenshots.screenshot_thumbnail_path` stores the full R2 URL (legacy column name).
+- Legacy `/screenshots/slug.webp` paths in the database are handled by `toAssetUrl()` which converts them to full R2 URLs.
 
 ---
 
 ## Session Log
 
 > ⚠️ Prepend new entries here. Newest first. Never delete old entries.
+
+### 2025-12-20
+- **Major: Migrated screenshot storage from VPS filesystem to Cloudflare R2**
+  - Added `lib/r2.ts` with S3-compatible upload utilities using `@aws-sdk/client-s3`
+  - Updated `lib/scraper/fresh-scraper.ts` to upload directly to R2 (no more VPS sync)
+  - Updated `lib/assets.ts` to use `R2_PUBLIC_URL` as base URL
+  - Added R2 write connectivity test to preflight checks
+  - Removed all VPS-related sync code and environment variables
+- Updated admin UI to show R2 storage status instead of VPS:
+  - `fresh-scraper-section.tsx`: Changed preflight tile from "VPS Storage" to "R2 Storage"
+  - `admin-overview.tsx`: Shows R2 connection status and bucket info
+  - `admin-context.tsx` and `admin-sidebar.tsx`: Changed environment type from 'vps' to 'production'
+  - `app/api/admin/system/route.ts`: Returns R2 config instead of filesystem stats
+- Ran migration script to transfer ~16,000 screenshots from VPS to R2
+- Updated `next.config.ts` to allow images from `screenshots.luminardigital.com`
+- Deleted `lib/screenshot/sync.ts` (VPS sync is no longer needed)
 
 ### 2025-12-19
 - Added scraper preflight + live confirmations UI so admins can validate Supabase/VPS/browser before scraping and track per-template Supabase + screenshot status.

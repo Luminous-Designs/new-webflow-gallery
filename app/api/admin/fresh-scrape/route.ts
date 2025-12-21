@@ -3,7 +3,7 @@ import { supabaseAdmin as supabase } from '@/lib/supabase';
 import axios from 'axios';
 import { clampFreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 import { chromium } from 'playwright';
-import { isR2Configured, getR2Config } from '@/lib/r2';
+import { isR2Configured, getR2Config, testR2WriteConnectivity } from '@/lib/r2';
 
 function safeJsonParse<T>(raw: unknown, fallback: T): T {
   if (raw === null || raw === undefined) return fallback;
@@ -20,18 +20,27 @@ function safeJsonParse<T>(raw: unknown, fallback: T): T {
 }
 
 async function runScraperPreflight() {
-  // Check R2 storage configuration
+  // Check R2 storage configuration and write connectivity
   const r2Config = getR2Config();
   const storage = {
-    ok: isR2Configured(),
+    ok: false,
     mode: 'r2' as const,
     publicUrl: r2Config.publicUrl,
     bucketName: r2Config.bucketName,
+    writable: false,
     error: null as string | null,
   };
 
-  if (!storage.ok) {
+  if (!isR2Configured()) {
     storage.error = 'R2 is not configured. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, and R2_PUBLIC_URL environment variables.';
+  } else {
+    // Test actual write connectivity
+    const writeTest = await testR2WriteConnectivity();
+    storage.writable = writeTest.ok;
+    storage.ok = writeTest.ok;
+    if (!writeTest.ok) {
+      storage.error = `R2 write test failed: ${writeTest.error}`;
+    }
   }
 
   const supabaseCheck = {

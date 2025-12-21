@@ -7,15 +7,11 @@ import {
   Package,
   Users,
   ShoppingCart,
-  HardDrive,
   Cloud,
   Laptop,
-  Images,
   Camera,
   Database,
   Sparkles,
-  FolderOpen,
-  AlertTriangle,
 } from 'lucide-react';
 import type { AdminSection } from '../admin-sidebar';
 
@@ -24,24 +20,24 @@ interface AdminOverviewProps {
 }
 
 export function AdminOverview({ onNavigate }: AdminOverviewProps) {
-  const { stats, systemStats, formatBytes } = useAdmin();
+  const { stats, systemStats } = useAdmin();
 
   return (
     <div className="space-y-6">
       {/* Environment Status Card */}
       <Card className={`p-4 border-2 ${
-        systemStats?.environment?.type === 'vps'
+        systemStats?.environment?.type === 'production'
           ? 'border-green-200 bg-gradient-to-r from-green-50 to-emerald-50'
           : 'border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50'
       }`}>
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-4">
             <div className={`p-3 rounded-xl ${
-              systemStats?.environment?.type === 'vps'
+              systemStats?.environment?.type === 'production'
                 ? 'bg-green-100'
                 : 'bg-blue-100'
             }`}>
-              {systemStats?.environment?.type === 'vps' ? (
+              {systemStats?.environment?.type === 'production' ? (
                 <Cloud className="h-8 w-8 text-green-600" />
               ) : (
                 <Laptop className="h-8 w-8 text-blue-600" />
@@ -52,12 +48,12 @@ export function AdminOverview({ onNavigate }: AdminOverviewProps) {
                 <h2 className="text-lg font-semibold">
                   {systemStats?.environment?.name || 'Detecting environment...'}
                 </h2>
-                <Badge variant={systemStats?.environment?.type === 'vps' ? 'default' : 'secondary'} className={
-                  systemStats?.environment?.type === 'vps'
+                <Badge variant={systemStats?.environment?.type === 'production' ? 'default' : 'secondary'} className={
+                  systemStats?.environment?.type === 'production'
                     ? 'bg-green-600'
                     : 'bg-blue-600'
                 }>
-                  {systemStats?.environment?.type === 'vps' ? 'Production' : 'Development'}
+                  {systemStats?.environment?.type === 'production' ? 'Production' : 'Development'}
                 </Badge>
               </div>
               <p className="text-sm text-gray-600 mt-1">
@@ -66,47 +62,27 @@ export function AdminOverview({ onNavigate }: AdminOverviewProps) {
             </div>
           </div>
 
-          {/* Storage Breakdown */}
-          <div className="grid grid-cols-2 md:grid-cols-2 gap-3">
+          {/* R2 Storage Info */}
+          <div className="grid grid-cols-1 gap-3">
             <div className="text-center p-3 bg-white/60 rounded-lg border">
-              <Images className="h-5 w-5 mx-auto text-purple-500 mb-1" />
-              <div className="text-lg font-bold text-gray-800">
-                {systemStats?.storage?.screenshotCount ?? 0}
+              <Cloud className="h-5 w-5 mx-auto text-orange-500 mb-1" />
+              <div className="text-sm font-bold text-gray-800">
+                {systemStats?.storage?.r2Configured ? 'R2 Connected' : 'R2 Not Configured'}
               </div>
-              <div className="text-xs text-gray-500">Screenshots</div>
-              <div className="text-xs text-gray-400">
-                {formatBytes(systemStats?.storage?.screenshots || 0)}
-              </div>
-            </div>
-            <div className="text-center p-3 bg-white/60 rounded-lg border border-2 border-gray-300">
-              <HardDrive className="h-5 w-5 mx-auto text-gray-600 mb-1" />
-              <div className="text-lg font-bold text-gray-800">
-                {formatBytes(systemStats?.storage?.total || 0)}
-              </div>
-              <div className="text-xs text-gray-500 font-medium">Total Storage</div>
+              <div className="text-xs text-gray-500">Cloudflare R2</div>
+              {systemStats?.storage?.r2PublicUrl && (
+                <div className="text-xs text-gray-400 truncate max-w-[200px]">
+                  {systemStats.storage.r2PublicUrl}
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Storage Warning for Local */}
-        {systemStats?.environment?.type === 'local' && (systemStats?.storage?.screenshotCount || 0) === 0 && (
-          <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
-              <div>
-                <p className="text-sm font-medium text-amber-800">No local images found</p>
-                <p className="text-xs text-amber-600 mt-1">
-                  This is expected if you run the scraper on the VPS. The gallery always loads images from the VPS asset domain.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Storage Path Info */}
+        {/* R2 Bucket Info */}
         <div className="mt-3 flex items-center gap-2 text-xs text-gray-500">
-          <FolderOpen className="h-3 w-3" />
-          <span>Storage path: <code className="bg-gray-100 px-1 rounded">{systemStats?.environment?.storagePath || '...'}</code></span>
+          <Cloud className="h-3 w-3" />
+          <span>R2 Bucket: <code className="bg-gray-100 px-1 rounded">{systemStats?.storage?.r2BucketName || 'not configured'}</code></span>
         </div>
       </Card>
 
@@ -145,10 +121,10 @@ export function AdminOverview({ onNavigate }: AdminOverviewProps) {
         <Card className="p-4 cursor-pointer hover:shadow-md transition-shadow" onClick={() => onNavigate('system')}>
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-gray-600">Storage Used</p>
-              <p className="text-2xl font-bold">{formatBytes(systemStats?.storage?.total || stats?.databaseSize || 0)}</p>
+              <p className="text-sm text-gray-600">R2 Storage</p>
+              <p className="text-2xl font-bold">{systemStats?.storage?.r2Configured ? 'Connected' : 'Not Configured'}</p>
             </div>
-            <HardDrive className="h-8 w-8 text-orange-500" />
+            <Cloud className="h-8 w-8 text-orange-500" />
           </div>
         </Card>
       </div>

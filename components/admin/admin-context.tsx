@@ -31,11 +31,11 @@ export interface SystemStats {
     nodeVersion: string;
   };
   environment: {
-    type: 'local' | 'vps';
+    type: 'local' | 'production';
     name: string;
     description: string;
-    persistentVolume: boolean;
-    storagePath: string;
+    storageMode: 'r2';
+    r2PublicUrl: string | null;
   };
   cpu: {
     cores: number;
@@ -55,9 +55,10 @@ export interface SystemStats {
     process: any;
   };
   storage: {
-    screenshots: number;
-    total: number;
-    screenshotCount: number;
+    mode: 'r2';
+    r2Configured: boolean;
+    r2BucketName: string | null;
+    r2PublicUrl: string | null;
   };
   recommendations: {
     maxConcurrency: number;

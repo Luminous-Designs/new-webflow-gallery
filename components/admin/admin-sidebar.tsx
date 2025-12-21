@@ -261,12 +261,12 @@ export function AdminSidebar({
         {!collapsed && systemStats?.environment && (
           <div className={cn(
             "px-3 py-2 rounded-lg text-xs",
-            systemStats.environment.type === 'vps'
+            systemStats.environment.type === 'production'
               ? "bg-green-50 text-green-700"
               : "bg-blue-50 text-blue-700"
           )}>
             <div className="font-medium">
-              {systemStats.environment.type === 'vps' ? 'Production' : 'Development'}
+              {systemStats.environment.type === 'production' ? 'Production' : 'Development'}
             </div>
             <div className="text-[10px] opacity-75 truncate">
               {systemStats.environment.name}

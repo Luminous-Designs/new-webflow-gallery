@@ -135,3 +135,39 @@ export function getR2Config() {
     publicUrl: R2_PUBLIC_URL || null,
   };
 }
+
+/**
+ * Test R2 write connectivity by uploading and deleting a test file.
+ * Returns { ok: true } if successful, { ok: false, error: string } otherwise.
+ */
+export async function testR2WriteConnectivity(): Promise<{ ok: boolean; error?: string }> {
+  if (!isR2Configured()) {
+    return { ok: false, error: 'R2 is not configured' };
+  }
+
+  const testKey = `_preflight_test_${Date.now()}.txt`;
+  const testContent = Buffer.from('preflight-check');
+
+  try {
+    const client = getS3Client();
+
+    // Upload test file
+    await client.send(new PutObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: testKey,
+      Body: testContent,
+      ContentType: 'text/plain',
+    }));
+
+    // Delete test file
+    await client.send(new DeleteObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: testKey,
+    }));
+
+    return { ok: true };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    return { ok: false, error: errorMsg };
+  }
+}

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import os from 'os';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { getR2Config } from '@/lib/r2';
 
 const CACHE_TTL_MS = 30_000;
 
@@ -14,11 +13,11 @@ interface SystemStatsPayload {
     nodeVersion: string;
   };
   environment: {
-    type: 'local' | 'vps';
+    type: 'local' | 'production';
     name: string;
     description: string;
-    persistentVolume: boolean;
-    storagePath: string;
+    storageMode: 'r2';
+    r2PublicUrl: string | null;
   };
   cpu: {
     cores: number;
@@ -43,9 +42,10 @@ interface SystemStatsPayload {
     };
   };
   storage: {
-    screenshots: number;
-    total: number;
-    screenshotCount: number;
+    mode: 'r2';
+    r2Configured: boolean;
+    r2BucketName: string | null;
+    r2PublicUrl: string | null;
   };
   recommendations: {
     maxConcurrency: number;
@@ -55,40 +55,6 @@ interface SystemStatsPayload {
 }
 
 let cachedResponse: { timestamp: number; payload: SystemStatsPayload } | null = null;
-
-async function getDirectorySize(dirPath: string): Promise<number> {
-  let size = 0;
-  try {
-    const dirHandle = await fs.opendir(dirPath);
-    for await (const entry of dirHandle) {
-      const entryPath = path.join(dirPath, entry.name);
-      if (entry.isDirectory()) {
-        size += await getDirectorySize(entryPath);
-      } else if (entry.isFile()) {
-        const stats = await fs.stat(entryPath);
-        size += stats.size;
-      }
-    }
-  } catch {
-    // Directory may not exist
-  }
-  return size;
-}
-
-async function getFileCount(dirPath: string): Promise<number> {
-  let count = 0;
-  try {
-    const dirHandle = await fs.opendir(dirPath);
-    for await (const entry of dirHandle) {
-      if (entry.isFile()) {
-        count++;
-      }
-    }
-  } catch {
-    // Directory may not exist
-  }
-  return count;
-}
 
 export async function GET(request: NextRequest) {
   try {
@@ -123,31 +89,21 @@ export async function GET(request: NextRequest) {
       };
     });
 
-    const screenshotDir = path.join(process.cwd(), 'public', 'screenshots');
-
-    const [screenshotSize, screenshotCount] = await Promise.all([
-      getDirectorySize(screenshotDir),
-      getFileCount(screenshotDir),
-    ]);
+    // Get R2 config for storage info
+    const r2Config = getR2Config();
 
     // Get scraper memory usage estimate
     const processMemory = process.memoryUsage();
 
     // Detect environment type
     const hostname = os.hostname();
-    const isVPS =
-                  hostname.includes('vps') ||
-                  hostname.includes('server') ||
-                  process.env.NODE_ENV === 'production' ||
-                  !hostname.includes('.local');
+    const isProduction = process.env.NODE_ENV === 'production';
 
-    const environmentType: 'local' | 'vps' = isVPS ? 'vps' : 'local';
-    const environmentName = isVPS ? 'Production Server (VPS)' : 'Local Development';
-    const environmentDescription = isVPS
-      ? `Running on ${hostname} with persistent storage`
-      : `Running on ${hostname}`;
+    const environmentType: 'local' | 'production' = isProduction ? 'production' : 'local';
+    const environmentName = isProduction ? 'Production' : 'Local Development';
+    const environmentDescription = `Running on ${hostname}`;
 
-    const payload = {
+    const payload: SystemStatsPayload = {
       system: {
         platform: os.platform(),
         architecture: os.arch(),
@@ -159,8 +115,8 @@ export async function GET(request: NextRequest) {
         type: environmentType,
         name: environmentName,
         description: environmentDescription,
-        persistentVolume: isVPS,
-        storagePath: screenshotDir
+        storageMode: 'r2',
+        r2PublicUrl: r2Config.publicUrl
       },
       cpu: {
         cores: cpus.length,
@@ -185,9 +141,10 @@ export async function GET(request: NextRequest) {
         }
       },
       storage: {
-        screenshots: screenshotSize,
-        total: screenshotSize,
-        screenshotCount
+        mode: 'r2',
+        r2Configured: r2Config.configured,
+        r2BucketName: r2Config.bucketName,
+        r2PublicUrl: r2Config.publicUrl
       },
       recommendations: {
         maxConcurrency: Math.min(cpus.length * 10, 100),

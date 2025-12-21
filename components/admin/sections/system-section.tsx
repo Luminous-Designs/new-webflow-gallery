@@ -3,7 +3,7 @@
 import { Card } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { useAdmin } from '../admin-context';
-import { Activity, Cpu, Server, HardDrive } from 'lucide-react';
+import { Activity, Cpu, Server, Cloud } from 'lucide-react';
 
 export function SystemSection() {
   const { systemStats, formatBytes } = useAdmin();
@@ -103,19 +103,22 @@ export function SystemSection() {
 
       <Card className="p-6">
         <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
-          <HardDrive className="h-5 w-5" />
-          Storage Usage
+          <Cloud className="h-5 w-5" />
+          R2 Storage
         </h2>
         {systemStats ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="p-4 bg-gray-50 rounded">
-              <div className="text-sm text-gray-600 mb-1">Screenshots</div>
-              <div className="text-lg font-semibold">{formatBytes(systemStats.storage.screenshots)}</div>
-              <div className="text-xs text-gray-400">{systemStats.storage.screenshotCount} files</div>
+              <div className="text-sm text-gray-600 mb-1">Status</div>
+              <div className={`text-lg font-semibold ${systemStats.storage.r2Configured ? 'text-green-600' : 'text-red-600'}`}>
+                {systemStats.storage.r2Configured ? 'Connected' : 'Not Configured'}
+              </div>
+              <div className="text-xs text-gray-400">Cloudflare R2</div>
             </div>
             <div className="p-4 bg-gray-50 rounded">
-              <div className="text-sm text-gray-600 mb-1">Total</div>
-              <div className="text-lg font-semibold">{formatBytes(systemStats.storage.total)}</div>
+              <div className="text-sm text-gray-600 mb-1">Public URL</div>
+              <div className="text-sm font-medium truncate">{systemStats.storage.r2PublicUrl || 'Not set'}</div>
+              <div className="text-xs text-gray-400">Bucket: {systemStats.storage.r2BucketName || 'Not set'}</div>
             </div>
           </div>
         ) : (
