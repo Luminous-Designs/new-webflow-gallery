@@ -440,6 +440,9 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
         return;
       }
       console.error('Fetch error:', error);
+      // Stop trying to load more on error to prevent infinite retry loops
+      hasMoreRef.current = false;
+      setPageInfo(prev => ({ ...prev, hasNext: false }));
     } finally {
       loadingRef.current = false;
       setLoading(false);

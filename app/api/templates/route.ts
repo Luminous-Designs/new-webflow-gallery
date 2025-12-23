@@ -449,18 +449,33 @@ export async function GET(request: NextRequest) {
           }
         }
       } else {
-        let query = supabaseAdmin.from('templates').select(TEMPLATE_CARD_SELECT, { count: 'exact' });
-        if (author) query = query.eq('author_id', author);
+        // First get the count to check if we're within bounds
+        let countQuery = supabaseAdmin.from('templates').select('id', { count: 'exact', head: true });
+        if (author) countQuery = countQuery.eq('author_id', author);
         if (applyFeaturedFilter) {
-          query = query.in('author_id', featuredAuthorIdList);
+          countQuery = countQuery.in('author_id', featuredAuthorIdList);
         }
 
-        const { data, count, error } = await query
-          .order('created_at', { ascending: false })
-          .range(offset, offset + limit - 1);
-        if (error) throw error;
+        const { count, error: countError } = await countQuery;
+        if (countError) throw countError;
         total = count || 0;
-        templates = (data || []) as TemplateRow[];
+
+        // If offset is beyond available data, return empty results
+        if (offset >= total) {
+          templates = [];
+        } else {
+          let query = supabaseAdmin.from('templates').select(TEMPLATE_CARD_SELECT);
+          if (author) query = query.eq('author_id', author);
+          if (applyFeaturedFilter) {
+            query = query.in('author_id', featuredAuthorIdList);
+          }
+
+          const { data, error } = await query
+            .order('created_at', { ascending: false })
+            .range(offset, offset + limit - 1);
+          if (error) throw error;
+          templates = (data || []) as TemplateRow[];
+        }
       }
     }
 
@@ -484,7 +499,13 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error) {
-    console.error('Templates API error:', error);
+    // Log more details about the error
+    console.error('Templates API error:', {
+      message: error instanceof Error ? error.message : String(error),
+      name: error instanceof Error ? error.name : 'Unknown',
+      stack: error instanceof Error ? error.stack : undefined,
+      raw: error
+    });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
