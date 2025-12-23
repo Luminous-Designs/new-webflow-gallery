@@ -16,10 +16,26 @@ import TemplatePreview from './template-preview';
 import type { Template } from '@/types/template';
 import { toAssetUrl } from '@/lib/assets';
 
+// Cache for subcategories and styles (persists across component re-renders)
+const metadataCache = {
+  subcategories: null as {id: number; name: string; slug: string; display_name: string; template_count: number}[] | null,
+  styles: null as {id: number; name: string; slug: string; display_name: string; template_count: number}[] | null,
+  lastFetched: 0,
+  CACHE_DURATION: 5 * 60 * 1000, // 5 minutes
+};
+
+// Prefetch cache for next page data
+const prefetchCache = new Map<string, { data: any; timestamp: number }>();
+const PREFETCH_CACHE_DURATION = 30 * 1000; // 30 seconds
+
 interface TemplateCardProps {
   template: Template;
   onPreview: (template: Template) => void;
   onAuthorClick: (authorId: string, authorName: string) => void;
+  /** Whether this image should be loaded with priority (for above-the-fold content) */
+  priority?: boolean;
+  /** Index of the template in the list (for lazy loading optimization) */
+  index?: number;
 }
 
 function formatDate(dateString?: string): string {
@@ -32,10 +48,13 @@ function formatDate(dateString?: string): string {
   });
 }
 
-function TemplateCard({ template, onPreview, onAuthorClick }: TemplateCardProps) {
+function TemplateCard({ template, onPreview, onAuthorClick, priority = false, index = 0 }: TemplateCardProps) {
   const [isHovered, setIsHovered] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const animationRef = useRef<NodeJS.Timeout | null>(null);
+
+  // First 6 images get priority loading (above the fold on most screens)
+  const shouldPrioritize = priority || index < 6;
 
   // Auto-scroll on hover
   useEffect(() => {
@@ -104,6 +123,8 @@ function TemplateCard({ template, onPreview, onAuthorClick }: TemplateCardProps)
                 height={750}
                 sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
                 className="w-full h-auto"
+                priority={shouldPrioritize}
+                loading={shouldPrioritize ? 'eager' : 'lazy'}
               />
             </div>
           ) : (
@@ -214,10 +235,16 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     template_count: number;
     type: 'style' | 'subcategory';
   }[]>([]);
-  const { ref: loadMoreRef, inView } = useInView({ threshold: 0.1 });
+
+  // Refs for infinite scroll state management
   const pageRef = useRef(1);
   const hasMoreRef = useRef(true);
   const loadingRef = useRef(false);
+  const lastFetchTimeRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Minimum delay between fetches (debounce)
+  const FETCH_DEBOUNCE_MS = 200;
 
   const normalizeTemplate = (template: any): Template => ({
     id: template.id,
@@ -239,29 +266,122 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     created_at: template.created_at
   });
 
-  // Fetch subcategories and all tags
+  // Fetch subcategories and styles with caching
   useEffect(() => {
-    fetch('/api/subcategories')
-      .then(res => res.json())
-      .then(data => {
-        setSubcategories(data);
-        setAllTags(data.map((cat: any) => ({ ...cat, type: 'subcategory' })));
-      })
-      .catch(console.error);
+    const now = Date.now();
+    const isCacheValid = metadataCache.lastFetched > 0 &&
+                         (now - metadataCache.lastFetched) < metadataCache.CACHE_DURATION;
 
-    fetch('/api/styles')
-      .then(res => res.json())
-      .then(data => {
-        setStyles(data);
-        setAllTags(prev => [...prev, ...data.map((style: any) => ({ ...style, type: 'style' }))]);
+    // Use cached data if valid
+    if (isCacheValid && metadataCache.subcategories && metadataCache.styles) {
+      setSubcategories(metadataCache.subcategories);
+      setStyles(metadataCache.styles);
+      setAllTags([
+        ...metadataCache.subcategories.map((cat: any) => ({ ...cat, type: 'subcategory' as const })),
+        ...metadataCache.styles.map((style: any) => ({ ...style, type: 'style' as const }))
+      ]);
+      return;
+    }
+
+    // Fetch fresh data
+    Promise.all([
+      fetch('/api/subcategories').then(res => res.json()),
+      fetch('/api/styles').then(res => res.json())
+    ])
+      .then(([subcatData, styleData]) => {
+        // Update cache
+        metadataCache.subcategories = subcatData;
+        metadataCache.styles = styleData;
+        metadataCache.lastFetched = Date.now();
+
+        // Update state
+        setSubcategories(subcatData);
+        setStyles(styleData);
+        setAllTags([
+          ...subcatData.map((cat: any) => ({ ...cat, type: 'subcategory' as const })),
+          ...styleData.map((style: any) => ({ ...style, type: 'style' as const }))
+        ]);
       })
       .catch(console.error);
   }, []);
 
-  // Main fetch function
+  // Build URL params for current filter state
+  const buildParams = useCallback((page: number) => {
+    const params = new URLSearchParams({
+      page: page.toString(),
+      limit: '20'
+    });
+
+    if (selectedAuthor) {
+      params.append('author', selectedAuthor.id);
+    } else if (collection === 'ultra') {
+      params.append('collection', 'ultra');
+    } else if (selectedTag.slug) {
+      if (selectedTag.type === 'subcategory') {
+        params.append('subcategory', selectedTag.slug);
+      } else if (selectedTag.type === 'style') {
+        params.append('style', selectedTag.slug);
+      }
+    }
+
+    return params;
+  }, [collection, selectedTag.slug, selectedTag.type, selectedAuthor]);
+
+  // Prefetch next page in background
+  const prefetchNextPage = useCallback(async (nextPage: number) => {
+    const params = buildParams(nextPage);
+    const cacheKey = params.toString();
+
+    // Check if already cached
+    const cached = prefetchCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp) < PREFETCH_CACHE_DURATION) {
+      return; // Already prefetched
+    }
+
+    try {
+      const response = await fetch(`/api/templates?${params}`);
+      const data = await response.json();
+
+      if (data.templates && data.pagination) {
+        prefetchCache.set(cacheKey, {
+          data,
+          timestamp: Date.now()
+        });
+
+        // Preload images for prefetched templates
+        data.templates.slice(0, 6).forEach((template: any) => {
+          if (template.screenshot_path) {
+            const url = toAssetUrl(template.screenshot_path);
+            if (url) {
+              const img = new window.Image();
+              img.src = url;
+            }
+          }
+        });
+      }
+    } catch {
+      // Silently fail prefetch - it's not critical
+    }
+  }, [buildParams]);
+
+  // Main fetch function with debouncing and abort support
   const fetchTemplates = useCallback(async (page: number, isReset: boolean = false) => {
+    // Prevent concurrent fetches
     if (loadingRef.current) return;
     if (!isReset && !hasMoreRef.current) return;
+
+    // Debounce rapid requests
+    const now = Date.now();
+    if (!isReset && (now - lastFetchTimeRef.current) < FETCH_DEBOUNCE_MS) {
+      return;
+    }
+    lastFetchTimeRef.current = now;
+
+    // Cancel any pending request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
 
     loadingRef.current = true;
     if (isReset) {
@@ -271,26 +391,22 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     }
 
     try {
-      const params = new URLSearchParams({
-        page: page.toString(),
-        limit: '20'
-      });
+      const params = buildParams(page);
+      const cacheKey = params.toString();
 
-      // Add author filter if selected
-      if (selectedAuthor) {
-        params.append('author', selectedAuthor.id);
-      } else if (collection === 'ultra') {
-        params.append('collection', 'ultra');
-      } else if (selectedTag.slug) {
-        if (selectedTag.type === 'subcategory') {
-          params.append('subcategory', selectedTag.slug);
-        } else if (selectedTag.type === 'style') {
-          params.append('style', selectedTag.slug);
-        }
+      // Check prefetch cache first
+      const cached = prefetchCache.get(cacheKey);
+      let data: any;
+
+      if (cached && (Date.now() - cached.timestamp) < PREFETCH_CACHE_DURATION) {
+        data = cached.data;
+        prefetchCache.delete(cacheKey); // Consume the cache
+      } else {
+        const response = await fetch(`/api/templates?${params}`, {
+          signal: abortControllerRef.current.signal
+        });
+        data = await response.json();
       }
-
-      const response = await fetch(`/api/templates?${params}`);
-      const data = await response.json();
 
       if (!data.templates || !data.pagination) return;
 
@@ -311,13 +427,38 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
         hasNext: data.pagination.hasNext
       });
 
+      // Prefetch next page if there's more data
+      if (data.pagination.hasNext) {
+        const nextPage = isReset ? 2 : page + 1;
+        // Delay prefetch slightly to not compete with current render
+        setTimeout(() => prefetchNextPage(nextPage + 1), 500);
+      }
+
     } catch (error) {
+      // Ignore abort errors
+      if (error instanceof Error && error.name === 'AbortError') {
+        return;
+      }
       console.error('Fetch error:', error);
     } finally {
       loadingRef.current = false;
       setLoading(false);
       setLoadingMore(false);
     }
+  }, [buildParams, prefetchNextPage]);
+
+  // Cleanup abort controller on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
+  // Clear prefetch cache when filters change
+  useEffect(() => {
+    prefetchCache.clear();
   }, [collection, selectedTag.slug, selectedTag.type, selectedAuthor]);
 
   // Reset and fetch when filters change
@@ -328,12 +469,33 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     fetchTemplates(1, true);
   }, [fetchTemplates]);
 
-  // Handle infinite scroll
+  // Setup infinite scroll with early trigger (100% viewport from bottom)
+  // Use the inView state to track when trigger element is visible
+  const { ref: loadMoreRef, inView } = useInView({
+    rootMargin: '100% 0px', // Trigger when within 100% of viewport height from bottom (loads early)
+    threshold: 0,
+  });
+
+  // Effect-based infinite scroll that re-checks after loading completes
+  // This handles the case where the trigger element stays in view after loading
   useEffect(() => {
-    if (inView && !loadingRef.current && hasMoreRef.current && templates.length > 0) {
-      fetchTemplates(pageRef.current, false);
+    // Only proceed if we have templates and more to load
+    if (templates.length === 0 || !hasMoreRef.current) return;
+
+    // Skip if any loading is in progress
+    if (loading || loadingMore) return;
+
+    // Only trigger if we're in view and not currently loading
+    if (inView && !loadingRef.current) {
+      // Small delay to batch rapid state changes and allow DOM to settle
+      const timer = setTimeout(() => {
+        if (!loadingRef.current && hasMoreRef.current) {
+          fetchTemplates(pageRef.current, false);
+        }
+      }, 150);
+      return () => clearTimeout(timer);
     }
-  }, [fetchTemplates, inView, templates.length]);
+  }, [inView, loading, loadingMore, templates.length, fetchTemplates]);
 
   // Handle author click - filter by author
   const handleAuthorClick = (authorId: string, authorName: string) => {
@@ -595,12 +757,13 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
           {/* Template Grid */}
           <div className="px-6 lg:px-12 py-8">
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
-              {templates.map((template) => (
+              {templates.map((template, index) => (
                 <TemplateCard
                   key={template.id}
                   template={template}
                   onPreview={setPreviewTemplate}
                   onAuthorClick={handleAuthorClick}
+                  index={index}
                 />
               ))}
             </div>
@@ -622,7 +785,7 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
               </div>
             )}
 
-            {/* Load More Loading */}
+            {/* Load More Loading Skeletons */}
             {loadingMore && (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8 mt-8">
                 {[...Array(3)].map((_, i) => (
@@ -637,30 +800,47 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
               </div>
             )}
 
-            {/* Load More Trigger */}
-            {pageInfo.hasNext && !loading && !loadingMore && templates.length > 0 && (
-              <div ref={loadMoreRef} className="py-12 flex flex-col items-center justify-center gap-4">
-                <div className="text-neutral-500 text-center">
-                  <Loader2 className="h-5 w-5 animate-spin mx-auto mb-3" />
-                  <span className="text-sm tracking-wide">Loading more templates...</span>
-                </div>
-                <Button
-                  variant="outline"
-                  onClick={() => fetchTemplates(pageRef.current, false)}
-                  disabled={loadingMore}
-                  className="rounded-none border-neutral-300"
-                >
-                  Load More
-                </Button>
-              </div>
-            )}
+            {/* Infinite Scroll Trigger - Always rendered for reliable observation */}
+            {templates.length > 0 && (
+              <div
+                ref={loadMoreRef}
+                className="py-8"
+                aria-hidden="true"
+              >
+                {/* Show loading indicator when fetching more */}
+                {loadingMore && (
+                  <div className="text-neutral-500 text-center">
+                    <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                    <span className="text-sm tracking-wide">Loading more templates...</span>
+                  </div>
+                )}
 
-            {/* End of Results */}
-            {!pageInfo.hasNext && templates.length > 0 && (
-              <div className="text-center py-12 border-t border-neutral-200 mt-8">
-                <p className="text-neutral-500 text-sm tracking-wide">
-                  Showing all {templates.length} templates
-                </p>
+                {/* Show subtle indicator when more pages available but not loading */}
+                {pageInfo.hasNext && !loadingMore && !loading && (
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="text-neutral-400 text-xs tracking-wide">
+                      Scroll for more
+                    </div>
+                    {/* Manual load button as fallback */}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => fetchTemplates(pageRef.current, false)}
+                      className="text-neutral-500 hover:text-neutral-700"
+                    >
+                      Load More
+                    </Button>
+                  </div>
+                )}
+
+                {/* End of results message */}
+                {!pageInfo.hasNext && !loadingMore && (
+                  <div className="text-center py-4 border-t border-neutral-200">
+                    <p className="text-neutral-500 text-sm tracking-wide">
+                      Showing all {templates.length} templates
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
