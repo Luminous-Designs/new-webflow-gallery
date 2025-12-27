@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// When running in Docker, use host.docker.internal to reach the host's Netdata
-const NETDATA_URL = process.env.NETDATA_URL ||
-  (process.env.DOCKER_HOST ? 'http://host.docker.internal:19999' : 'http://localhost:19999');
+// Netdata URL - defaults to Coolify network gateway which can access host services
+const NETDATA_URL = process.env.NETDATA_URL || 'http://10.0.1.1:19999';
 const METRICS_PASSWORD = process.env.METRICS_PASSWORD || process.env.ADMIN_PASSWORD;
 
 function verifyAuth(request: NextRequest): boolean {

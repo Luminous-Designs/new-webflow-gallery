@@ -3,10 +3,9 @@ import { NextRequest, NextResponse } from 'next/server';
 // Netdata API proxy - allows frontend to fetch metrics without CORS issues
 // When running on the VPS, this accesses Netdata locally
 
-// When running in Docker, use host.docker.internal to reach the host's Netdata
-// In development or when running directly on the host, use localhost
-const NETDATA_URL = process.env.NETDATA_URL ||
-  (process.env.DOCKER_HOST ? 'http://host.docker.internal:19999' : 'http://localhost:19999');
+// Netdata URL - defaults to Coolify network gateway which can access host services
+// Override with NETDATA_URL env var if needed
+const NETDATA_URL = process.env.NETDATA_URL || 'http://10.0.1.1:19999';
 const METRICS_PASSWORD = process.env.METRICS_PASSWORD || process.env.ADMIN_PASSWORD;
 
 function verifyAuth(request: NextRequest): boolean {
