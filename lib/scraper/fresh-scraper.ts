@@ -69,6 +69,7 @@ interface ScrapedData {
   isEcommerce: boolean;
   primaryCategory: string[];
   webflowSubcategories: string[];
+  publishDate: string | null; // Template publish date (e.g., "2024-09-28")
 }
 
 export interface FreshScraperConfig {
@@ -78,6 +79,16 @@ export interface FreshScraperConfig {
   pagesPerBrowser: number;
   batchSize: number;
   timeout: number;
+  /** Additional selectors removed only for this run (in addition to screenshot_exclusions). */
+  additionalScreenshotSelectors?: string[];
+  /** If set, bypass homepage detection and screenshot this exact URL (one-off operations typically run with batchSize=1). */
+  forceScreenshotUrl?: string;
+  /** If true, and `requiredSelectors` are not found, skip screenshotting that template. */
+  skipIfMissingRequiredSelectors?: boolean;
+  /** CSS selectors / ids that must exist on the page to proceed. */
+  requiredSelectors?: string[];
+  /** If true, append a cache-busting query param to `screenshot_path` after upload. */
+  appendCacheBusterToScreenshotPath?: boolean;
   // Screenshot timing / stability controls
   screenshotAnimationWaitMs: number;
   screenshotNudgeScrollRatio: number;
@@ -169,6 +180,36 @@ export function clampFreshScraperConfig(config: Partial<FreshScraperConfig>): Pa
   const clampedWebp = clampOptionalInt(config.screenshotWebpQuality, FRESH_SCRAPER_LIMITS.screenshotQuality.min, FRESH_SCRAPER_LIMITS.screenshotQuality.max);
   if (clampedWebp !== undefined) out.screenshotWebpQuality = clampedWebp;
 
+  if (typeof config.forceScreenshotUrl === 'string' && config.forceScreenshotUrl.trim()) {
+    out.forceScreenshotUrl = config.forceScreenshotUrl.trim();
+  }
+
+  if (typeof config.skipIfMissingRequiredSelectors === 'boolean') {
+    out.skipIfMissingRequiredSelectors = config.skipIfMissingRequiredSelectors;
+  }
+
+  if (Array.isArray(config.requiredSelectors)) {
+    const selectors = config.requiredSelectors
+      .filter((s): s is string => typeof s === 'string')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 5);
+    if (selectors.length) out.requiredSelectors = selectors;
+  }
+
+  if (Array.isArray(config.additionalScreenshotSelectors)) {
+    const selectors = config.additionalScreenshotSelectors
+      .filter((s): s is string => typeof s === 'string')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 10);
+    if (selectors.length) out.additionalScreenshotSelectors = selectors;
+  }
+
+  if (typeof config.appendCacheBusterToScreenshotPath === 'boolean') {
+    out.appendCacheBusterToScreenshotPath = config.appendCacheBusterToScreenshotPath;
+  }
+
   return out;
 }
 
@@ -176,7 +217,7 @@ export interface TemplatePhase {
   url: string;
   slug: string;
   name: string | null;
-  phase: 'pending' | 'loading' | 'scraping_details' | 'taking_screenshot' | 'processing_screenshot' | 'saving' | 'completed' | 'failed' | 'timeout_paused';
+  phase: 'pending' | 'loading' | 'scraping_details' | 'taking_screenshot' | 'processing_screenshot' | 'saving' | 'completed' | 'failed' | 'skipped' | 'timeout_paused';
   startTime: number;
   error?: string;
 }
@@ -235,6 +276,8 @@ interface BrowserScrapeSuccess {
   success: true;
   slug: string;
   templateRowId?: number;
+  skipped?: boolean;
+  skipReason?: string;
   data: {
     name: string;
     authorId: string | null;
@@ -380,6 +423,11 @@ export class FreshScraper extends EventEmitter {
       pagesPerBrowser: sanitized.pagesPerBrowser ?? 5,
       batchSize: sanitized.batchSize ?? 50,
       timeout: sanitized.timeout ?? 60000,
+      additionalScreenshotSelectors: sanitized.additionalScreenshotSelectors ?? [],
+      forceScreenshotUrl: sanitized.forceScreenshotUrl,
+      skipIfMissingRequiredSelectors: sanitized.skipIfMissingRequiredSelectors ?? false,
+      requiredSelectors: sanitized.requiredSelectors ?? [],
+      appendCacheBusterToScreenshotPath: sanitized.appendCacheBusterToScreenshotPath ?? false,
 
       // Screenshot defaults tuned for reliable animation settling
       screenshotAnimationWaitMs: sanitized.screenshotAnimationWaitMs ?? 3000,
@@ -608,6 +656,39 @@ export class FreshScraper extends EventEmitter {
       this.log('warn', `Failed to fetch screenshot exclusions: ${error}`);
     }
     return this.screenshotExclusionSelectors;
+  }
+
+  private withCacheBuster(url: string): string {
+    if (!this.config.appendCacheBusterToScreenshotPath) return url;
+    try {
+      const u = new URL(url);
+      u.searchParams.set('v', String(Date.now()));
+      return u.toString();
+    } catch {
+      return url;
+    }
+  }
+
+  private async pageHasAnySelector(page: Page, selectors: string[]): Promise<boolean> {
+    if (!selectors.length) return true;
+	    return page.evaluate((sels) => {
+	      const normalize = (sel: string) => {
+	        const s = sel.trim();
+	        if (!s) return null;
+	        if (s.startsWith('.') || s.startsWith('#') || s.startsWith('[')) return s;
+	        return `.${s}, #${s}`;
+	      };
+      for (const raw of sels) {
+        const s = typeof raw === 'string' ? normalize(raw) : null;
+        if (!s) continue;
+        try {
+          if (document.querySelector(s)) return true;
+        } catch {
+          // ignore invalid selectors
+        }
+      }
+      return false;
+    }, selectors);
   }
 
   private async newContext(browser: Browser): Promise<BrowserContext> {
@@ -1049,6 +1130,10 @@ export class FreshScraper extends EventEmitter {
       }
 
       const selectors = await this.getScreenshotExclusionSelectors(internalBatchIndex === 0);
+      const mergedSelectors = Array.from(new Set([
+        ...selectors,
+        ...(this.config.additionalScreenshotSelectors || [])
+      ]));
       const chunkSize = Math.max(1, this.config.batchSize || urlsToProcess.length);
       const batchUrls = urlsToProcess.slice(offset, offset + chunkSize);
       offset += batchUrls.length;
@@ -1093,7 +1178,7 @@ export class FreshScraper extends EventEmitter {
             return;
           }
 
-          browserResult = await this.scrapeTemplateInBrowser(pageInfo.page, url, index, selectors);
+        browserResult = await this.scrapeTemplateInBrowser(pageInfo.page, url, index, mergedSelectors);
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : 'Unknown error';
           const isTimeout = errorMsg.includes('Timeout') || errorMsg.includes('timeout');
@@ -1327,16 +1412,75 @@ export class FreshScraper extends EventEmitter {
           throw new Error(previewNavResult.error || 'Preview navigation failed');
         }
 
-        const homepageDetection = await detectHomepage(page, entry.live_preview_url);
-        const screenshotUrl = homepageDetection.screenshotUrl;
-        const isAlternateHomepage = homepageDetection.isAlternateHomepage;
-        const alternateHomepagePath = homepageDetection.detectedPath || null;
+        let screenshotUrl = entry.live_preview_url;
+        let isAlternateHomepage = false;
+        let alternateHomepagePath: string | null = null;
 
-        if (homepageDetection.isAlternateHomepage) {
-          this.log('info', `[ALTERNATE] Found alternate homepage for ${slug}: ${homepageDetection.detectedPath}`);
-          const altNavResult = await this.navigateWithRetry(page, homepageDetection.screenshotUrl, 2);
-          if (!altNavResult.success) {
-            this.log('warn', `Failed to navigate to alternate homepage: ${altNavResult.error}`);
+        if (this.config.forceScreenshotUrl) {
+          const base = new URL(entry.live_preview_url);
+          const forced = new URL(this.config.forceScreenshotUrl, base.origin);
+          if (forced.origin !== base.origin) {
+            throw new Error(`forceScreenshotUrl must be on the same origin as live_preview_url (${base.origin})`);
+          }
+          screenshotUrl = forced.toString();
+          const pathA = base.pathname.replace(/\/+$/, '') || '/';
+          const pathB = forced.pathname.replace(/\/+$/, '') || '/';
+          isAlternateHomepage = pathA !== pathB;
+          alternateHomepagePath = isAlternateHomepage ? forced.pathname : null;
+
+          const forcedNavResult = await this.navigateWithRetry(page, screenshotUrl, 2);
+          if (!forcedNavResult.success) {
+            throw new Error(forcedNavResult.error || 'Forced screenshot navigation failed');
+          }
+        } else {
+          const homepageDetection = await detectHomepage(page, entry.live_preview_url);
+          screenshotUrl = homepageDetection.screenshotUrl;
+          isAlternateHomepage = homepageDetection.isAlternateHomepage;
+          alternateHomepagePath = homepageDetection.detectedPath || null;
+
+          if (homepageDetection.isAlternateHomepage) {
+            this.log('info', `[ALTERNATE] Found alternate homepage for ${slug}: ${homepageDetection.detectedPath}`);
+            const altNavResult = await this.navigateWithRetry(page, homepageDetection.screenshotUrl, 2);
+            if (!altNavResult.success) {
+              this.log('warn', `Failed to navigate to alternate homepage: ${altNavResult.error}`);
+            }
+          }
+        }
+
+        if (this.config.skipIfMissingRequiredSelectors && (this.config.requiredSelectors || []).length > 0) {
+          const hasSelector = await this.pageHasAnySelector(page, this.config.requiredSelectors || []);
+          if (!hasSelector) {
+            const reason = 'Required selector not found; skipping screenshot';
+            this.log('info', `[screenshots-only] ${slug}: ${reason}`);
+            this.updatePhase(batchIndex, 'skipped');
+            return {
+              success: true,
+              slug,
+              templateRowId: entry.id,
+              skipped: true,
+              skipReason: reason,
+              data: {
+                name: entry.name || slug,
+                authorId: entry.author_id,
+                authorName: entry.author_name,
+                authorAvatar: entry.author_avatar,
+                livePreviewUrl: entry.live_preview_url,
+                designerPreviewUrl: '',
+                price: '',
+                shortDescription: '',
+                longDescription: '',
+                subcategories: [],
+                styles: [],
+                features: [],
+                isCms: false,
+                isEcommerce: false,
+              },
+              isFeaturedAuthor,
+              screenshotBuffer: null,
+              screenshotUrl,
+              isAlternateHomepage,
+              alternateHomepagePath
+            };
           }
         }
 
@@ -1527,6 +1671,76 @@ export class FreshScraper extends EventEmitter {
           }
         });
 
+        // Extract PUBLISH DATE from the storefront page
+        // The date is typically displayed in format "Dec 24, 2025"
+        let publishDateRaw: string | null = null;
+
+        // Strategy 1: Look for elements with "publish" in class name
+        const publishElements = document.querySelectorAll('[class*="publish"]');
+        for (const el of publishElements) {
+          const text = el.textContent?.trim();
+          if (text && /\w{3}\s+\d{1,2},?\s+\d{4}/.test(text)) {
+            publishDateRaw = text;
+            break;
+          }
+        }
+
+        // Strategy 2: Search all text nodes for standalone date pattern
+        if (!publishDateRaw) {
+          const walker = document.createTreeWalker(
+            document.body,
+            NodeFilter.SHOW_TEXT,
+            null
+          );
+          let node;
+          while ((node = walker.nextNode())) {
+            const text = node.textContent?.trim();
+            if (text) {
+              const dateMatch = text.match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}$/i);
+              if (dateMatch) {
+                publishDateRaw = dateMatch[0];
+                break;
+              }
+            }
+          }
+        }
+
+        // Strategy 3: Look for any element containing just a date
+        if (!publishDateRaw) {
+          const allElements = document.querySelectorAll('div, span, p, time');
+          for (const el of allElements) {
+            const directText = Array.from(el.childNodes)
+              .filter(n => n.nodeType === Node.TEXT_NODE)
+              .map(n => n.textContent?.trim())
+              .join(' ')
+              .trim();
+
+            const dateMatch = directText.match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}$/i);
+            if (dateMatch) {
+              publishDateRaw = dateMatch[0];
+              break;
+            }
+          }
+        }
+
+        // Parse the date string to ISO format (YYYY-MM-DD)
+        let publishDate: string | null = null;
+        if (publishDateRaw) {
+          const months: { [key: string]: number } = {
+            'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3, 'may': 4, 'jun': 5,
+            'jul': 6, 'aug': 7, 'sep': 8, 'oct': 9, 'nov': 10, 'dec': 11
+          };
+          const match = publishDateRaw.match(/(\w{3})\s+(\d{1,2}),?\s+(\d{4})/i);
+          if (match) {
+            const [, monthStr, day, year] = match;
+            const monthNum = months[monthStr.toLowerCase()];
+            if (monthNum !== undefined) {
+              const d = new Date(parseInt(year), monthNum, parseInt(day));
+              publishDate = d.toISOString().split('T')[0];
+            }
+          }
+        }
+
         return {
           name,
           authorId,
@@ -1543,7 +1757,8 @@ export class FreshScraper extends EventEmitter {
           isCms,
           isEcommerce,
           primaryCategory,
-          webflowSubcategories
+          webflowSubcategories,
+          publishDate
         };
       }) as ScrapedData;
 
@@ -1684,7 +1899,7 @@ export class FreshScraper extends EventEmitter {
           const r2Url = await this.uploadScreenshotToR2Storage(slug, processedBuffer);
           if (r2Url) {
             // Store the R2 public URL as the screenshot path
-            screenshotPath = r2Url;
+            screenshotPath = this.withCacheBuster(r2Url);
             this.log('info', `Screenshot uploaded for ${slug} → ${screenshotPath} (${processedBuffer.length} bytes)`);
           }
         }
@@ -1704,6 +1919,11 @@ export class FreshScraper extends EventEmitter {
     if (this.jobMode === 'screenshots_only') {
       if (!result.templateRowId) {
         throw new Error('screenshots_only mode requires templateRowId');
+      }
+      if (result.skipped) {
+        this.updatePhase(batchIndex, 'skipped');
+        this.log('info', `Skipped (screenshots-only): ${slug}${result.skipReason ? ` (${result.skipReason})` : ''}`);
+        return {};
       }
       if (!screenshotPath) {
         throw new Error('Screenshot processing failed (no screenshotPath)');
@@ -1762,6 +1982,8 @@ export class FreshScraper extends EventEmitter {
         webflow_subcategories: Array.isArray((data as ScrapedData).webflowSubcategories) && (data as ScrapedData).webflowSubcategories.length > 0
           ? (data as ScrapedData).webflowSubcategories
           : null,
+        // Template publish date
+        publish_date: (data as ScrapedData).publishDate || null,
       },
       subcategories: Array.isArray(data.subcategories) ? data.subcategories : [],
       styles: Array.isArray(data.styles) ? data.styles : [],

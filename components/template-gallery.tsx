@@ -9,12 +9,18 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { motion } from 'framer-motion';
-import { Eye, X, Loader2, Search, Sparkles, ExternalLink, Calendar, User, Star, ChevronDown, ChevronUp } from 'lucide-react';
+import { Eye, X, Loader2, Search, Sparkles, ExternalLink, Calendar, User, Star, ChevronDown, ChevronUp, FolderHeart, Settings } from 'lucide-react';
 import Image from 'next/image';
+import Link from 'next/link';
 import { useInView } from '@/hooks/useInView';
 import TemplatePreview from './template-preview';
 import type { Template } from '@/types/template';
 import { toAssetUrl } from '@/lib/assets';
+import { AuthButton } from '@/components/auth/auth-button';
+import { SaveToCollectionButton } from '@/components/collections/save-to-collection-button';
+import { useAuth } from '@/components/auth/auth-context';
+import { AdminQueueWidget } from '@/components/admin-gallery/admin-queue-widget';
+import { AdminTemplateToolsDialog } from '@/components/admin-gallery/admin-template-tools-dialog';
 
 // Types for categories
 interface CategoryItem {
@@ -48,6 +54,8 @@ interface TemplateCardProps {
   onPreview: (template: Template) => void;
   onAuthorClick: (authorId: string, authorName: string) => void;
   onCategoryClick?: (category: string, type: 'primary' | 'subcategory') => void;
+  onAdminTools?: (template: Template) => void;
+  isAdmin?: boolean;
   priority?: boolean;
   index?: number;
 }
@@ -62,7 +70,7 @@ function formatDate(dateString?: string): string {
   });
 }
 
-function TemplateCard({ template, onPreview, onAuthorClick, onCategoryClick, priority = false, index = 0 }: TemplateCardProps) {
+function TemplateCard({ template, onPreview, onAuthorClick, onCategoryClick, onAdminTools, isAdmin = false, priority = false, index = 0 }: TemplateCardProps) {
   const [isHovered, setIsHovered] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const animationRef = useRef<NodeJS.Timeout | null>(null);
@@ -150,7 +158,30 @@ function TemplateCard({ template, onPreview, onAuthorClick, onCategoryClick, pri
           )}
 
           {/* Hover Overlay with Actions */}
-          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end">
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-between">
+            {/* Save to Collection Button */}
+            <div className="p-3 flex justify-end gap-2">
+              {isAdmin ? (
+                <button
+                  type="button"
+                  className="inline-flex h-9 w-9 items-center justify-center bg-white/90 hover:bg-white text-neutral-900 border-0 rounded-none"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAdminTools?.(template);
+                  }}
+                  aria-label="Admin tools"
+                  title="Admin tools"
+                >
+                  <Settings className="h-4 w-4" />
+                </button>
+              ) : null}
+              <SaveToCollectionButton
+                templateId={template.id}
+                templateName={template.name}
+                thumbnailUrl={toAssetUrl(template.screenshot_path) ?? undefined}
+              />
+            </div>
+
             <div className="p-5 flex gap-3">
               <Button
                 size="sm"
@@ -225,7 +256,7 @@ function TemplateCard({ template, onPreview, onAuthorClick, onCategoryClick, pri
             </div>
           )}
 
-          {/* Author and Date */}
+          {/* Author and Publish Date */}
           <div className="flex items-center justify-between text-sm">
             <button
               onClick={handleAuthorClick}
@@ -238,10 +269,14 @@ function TemplateCard({ template, onPreview, onAuthorClick, onCategoryClick, pri
               </span>
             </button>
 
-            <div className="flex items-center gap-1.5 text-neutral-500">
-              <Calendar className="h-3.5 w-3.5" />
-              <span className="text-xs tracking-wide">{formatDate(template.created_at)}</span>
-            </div>
+            {template.publish_date && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 bg-blue-50 text-blue-600 rounded-sm">
+                <Calendar className="h-3 w-3" />
+                <span className="text-[10px] font-medium tracking-wide">
+                  {formatDate(template.publish_date)}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Price */}
@@ -256,15 +291,38 @@ function TemplateCard({ template, onPreview, onAuthorClick, onCategoryClick, pri
   );
 }
 
+// My Collections Button - only shows for logged in users
+function MyCollectionsButton() {
+  const { user } = useAuth();
+
+  if (!user) return null;
+
+  return (
+    <Link href="/collections">
+      <Button
+        variant="outline"
+        className="rounded-none border-neutral-300 hover:border-neutral-900 hover:bg-neutral-50 h-10 text-sm font-medium"
+      >
+        <FolderHeart className="h-4 w-4 mr-2" />
+        <span className="hidden sm:inline">My Collections</span>
+        <span className="sm:hidden">Collections</span>
+      </Button>
+    </Link>
+  );
+}
+
 interface TemplateGalleryProps {
   onTemplateSelect: (template: Template) => void;
 }
 
 export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryProps) {
+  const { isAdmin } = useAuth();
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [pageInfo, setPageInfo] = useState({ current: 1, total: 0, hasNext: true });
+  const [adminToolsTemplate, setAdminToolsTemplate] = useState<Template | null>(null);
+  const [adminToolsOpen, setAdminToolsOpen] = useState(false);
 
   // New category state
   const [primaryCategories, setPrimaryCategories] = useState<CategoryItem[]>([]);
@@ -307,6 +365,7 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     // Add new fields
     primary_category: template.primary_category,
     webflow_subcategories: template.webflow_subcategories,
+    publish_date: template.publish_date,
   });
 
   // Fetch categories with caching
@@ -368,6 +427,15 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
 
     return params;
   }, [collection, selectedFilters, selectedAuthor]);
+
+  const handleAdminTools = useCallback((t: Template) => {
+    setAdminToolsTemplate(t);
+    setAdminToolsOpen(true);
+  }, []);
+
+  const handleTemplateScreenshotUpdated = useCallback((templateId: number, screenshotPath: string) => {
+    setTemplates((prev) => prev.map((t) => (t.id === templateId ? { ...t, screenshot_path: screenshotPath } : t)));
+  }, []);
 
   // Prefetch next page
   const prefetchNextPage = useCallback(async (nextPage: number) => {
@@ -576,13 +644,23 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     <div className="min-h-screen bg-neutral-50">
       {/* Hero Section */}
       <header className="bg-white border-b border-neutral-200">
-        <div className="w-full px-6 lg:px-12 py-16">
-          <h1 className="text-4xl lg:text-5xl font-bold text-neutral-900 tracking-tight mb-4">
-            Template Gallery
-          </h1>
-          <p className="text-lg text-neutral-600 max-w-2xl">
-            Curated collection of premium Webflow templates for your next project
-          </p>
+        <div className="w-full px-6 lg:px-12 py-12 lg:py-16">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-6">
+            <div>
+              <h1 className="text-3xl lg:text-5xl font-bold text-neutral-900 tracking-tight mb-3 lg:mb-4">
+                Template Gallery
+              </h1>
+              <p className="text-base lg:text-lg text-neutral-600 max-w-2xl">
+                Curated collection of premium Webflow templates for your next project
+              </p>
+            </div>
+
+            {/* Auth and Collections buttons */}
+            <div className="flex items-center gap-3 flex-shrink-0">
+              <MyCollectionsButton />
+              <AuthButton />
+            </div>
+          </div>
         </div>
       </header>
 
@@ -914,6 +992,8 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                     onPreview={setPreviewTemplate}
                     onAuthorClick={handleAuthorClick}
                     onCategoryClick={handleCategoryClick}
+                    isAdmin={isAdmin}
+                    onAdminTools={handleAdminTools}
                     index={index}
                   />
                 ))}
@@ -968,6 +1048,17 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
           },
         }}
       />
+
+      {isAdmin ? (
+        <>
+          <AdminQueueWidget onTemplateScreenshotUpdated={handleTemplateScreenshotUpdated} />
+          <AdminTemplateToolsDialog
+            template={adminToolsTemplate}
+            open={adminToolsOpen}
+            onOpenChange={(next) => setAdminToolsOpen(next)}
+          />
+        </>
+      ) : null}
     </div>
   );
 }

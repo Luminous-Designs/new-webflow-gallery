@@ -27,6 +27,8 @@ export interface SupabaseTemplateUpsertPayload {
     // New Webflow category fields (stored directly on template as text arrays)
     primary_category?: string[] | null;
     webflow_subcategories?: string[] | null;
+    // Template publish date on Webflow marketplace
+    publish_date?: string | null;
   };
   subcategories: string[];
   styles: string[];

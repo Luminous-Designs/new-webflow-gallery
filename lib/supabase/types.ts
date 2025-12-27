@@ -575,3 +575,50 @@ export interface AlternateHomepageMetrics {
   alternatePercentage: number;
   topAlternatePaths: Array<{ path: string; count: number }>;
 }
+
+// User Authentication & Collections Types
+export interface Profile {
+  id: string;
+  email: string;
+  full_name: string | null;
+  avatar_url: string | null;
+  is_admin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Collection {
+  id: number;
+  user_id: string;
+  name: string;
+  description: string | null;
+  is_favorites: boolean;
+  is_public: boolean;
+  thumbnail_template_id: number | null;
+  template_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CollectionTemplate {
+  id: number;
+  collection_id: number;
+  template_id: number;
+  added_at: string;
+  notes: string | null;
+}
+
+// Collection with joined template data for display
+export interface CollectionWithThumbnail extends Collection {
+  thumbnail_template?: {
+    id: number;
+    name: string;
+    screenshot_path: string | null;
+  } | null;
+}
+
+// Template with collection membership info
+export interface TemplateInCollection extends Template {
+  added_at: string;
+  notes: string | null;
+}

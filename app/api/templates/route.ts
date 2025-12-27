@@ -29,7 +29,8 @@ const TEMPLATE_CARD_SELECT = `
   created_at,
   updated_at,
   primary_category,
-  webflow_subcategories
+  webflow_subcategories,
+  publish_date
 `;
 
 type TemplateRow = Record<string, unknown> & { id: number; author_id?: string | null };

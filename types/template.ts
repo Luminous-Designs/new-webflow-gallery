@@ -18,5 +18,6 @@ export interface Template {
   is_featured_author?: boolean;
   position?: number;
   created_at?: string;
+  publish_date?: string; // Template publish date on Webflow marketplace (YYYY-MM-DD)
   [key: string]: unknown;
 }
