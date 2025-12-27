@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const NETDATA_URL = process.env.NETDATA_URL || 'http://localhost:19999';
+// When running in Docker, use host.docker.internal to reach the host's Netdata
+const NETDATA_URL = process.env.NETDATA_URL ||
+  (process.env.DOCKER_HOST ? 'http://host.docker.internal:19999' : 'http://localhost:19999');
 const METRICS_PASSWORD = process.env.METRICS_PASSWORD || process.env.ADMIN_PASSWORD;
 
 function verifyAuth(request: NextRequest): boolean {
