@@ -21,21 +21,32 @@ export async function GET() {
       .select('*', { count: 'exact', head: true });
 
     const databaseOk = !countError;
+    const env = {
+      supabaseUrl: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
+      anonKey: Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+      serviceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+      projectRef: extractProjectRef(process.env.NEXT_PUBLIC_SUPABASE_URL),
+    };
+
+    if (!databaseOk) {
+      return NextResponse.json({
+        status: 'unhealthy',
+        timestamp: new Date().toISOString(),
+        database: 'disconnected',
+        error: countError?.message || 'Database connection failed',
+        env,
+      }, { status: 503 });
+    }
 
     return NextResponse.json({
       status: 'healthy',
       timestamp: new Date().toISOString(),
-      database: databaseOk ? 'connected' : 'disconnected',
+      database: 'connected',
       templates: templateCount || 0,
       version: process.env.npm_package_version || '1.0.0',
       node: process.version,
       uptime: process.uptime(),
-      env: {
-        supabaseUrl: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
-        anonKey: Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
-        serviceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
-        projectRef: extractProjectRef(process.env.NEXT_PUBLIC_SUPABASE_URL),
-      },
+      env,
     });
   } catch (error) {
     console.error('Health check failed:', error);
