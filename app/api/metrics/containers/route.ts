@@ -108,8 +108,21 @@ export async function GET(request: NextRequest) {
 
         // Try to find a matching entry in the mapping
         for (const [fullName, mappedFqdn] of Object.entries(containerMapping)) {
-          // Check if the container ID matches the start of any mapped container name
-          if (fullName.startsWith(containerId) || containerId.startsWith(fullName.split('-')[0])) {
+          // Exact match
+          if (fullName === containerId) {
+            fqdn = mappedFqdn;
+            break;
+          }
+          // Container name starts with the Netdata ID (handles deployment suffixes)
+          // e.g., "n0wgggc8wsgg0scs0cwws48c-233350234637" starts with "n0wgggc8wsgg0scs0cwws48c"
+          if (fullName.startsWith(containerId + '-')) {
+            fqdn = mappedFqdn;
+            break;
+          }
+          // Netdata ID starts with the container base name (without deployment suffix)
+          // e.g., containerId "n0wgggc8wsgg0scs0cwws48c" matches fullName "n0wgggc8wsgg0scs0cwws48c-233350234637"
+          const baseName = fullName.split('-').slice(0, -1).join('-');
+          if (baseName && containerId === baseName) {
             fqdn = mappedFqdn;
             break;
           }

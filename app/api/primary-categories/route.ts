@@ -1,12 +1,16 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase/client';
+import { supabaseAdmin } from '@/lib/supabase/client';
 
 export const revalidate = 300; // 5 minutes
 
 export async function GET() {
   try {
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('Server misconfigured: missing SUPABASE_SERVICE_ROLE_KEY');
+    }
+
     // Get all unique primary categories with their template counts
-    const { data: templates, error } = await supabase
+    const { data: templates, error } = await supabaseAdmin
       .from('templates')
       .select('primary_category')
       .not('primary_category', 'is', null);

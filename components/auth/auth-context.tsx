@@ -142,7 +142,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.log('[Auth] getUser result:', { user: user?.id, error: userError?.message })
 
         if (userError) {
-          console.error('[Auth] Error getting user:', userError)
+          // Expected on first load when no session exists - not an error
+          const isSessionMissing =
+            userError.name === 'AuthSessionMissingError' ||
+            userError.message?.includes('Auth session missing') ||
+            userError.message?.includes('session_not_found');
+
+          if (isSessionMissing) {
+            // This is normal for pages that don't require auth
+            console.log('[Auth] No active session (expected for guest users)')
+          } else {
+            console.error('[Auth] Error getting user:', userError)
+          }
+
+          if (mounted) {
+            setUser(null)
+            setSession(null)
+            setProfile(null)
+            setCollections([])
+            setFavoriteTemplateIds(new Set())
+          }
           if (mounted) {
             setIsLoading(false)
           }
