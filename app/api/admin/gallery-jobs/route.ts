@@ -79,6 +79,7 @@ export async function POST(request: NextRequest) {
 
   const selector = typeof obj.selector === 'string' ? obj.selector.trim() : undefined;
   const homepageUrlRaw = typeof obj.homepageUrl === 'string' ? obj.homepageUrl.trim() : undefined;
+  const persistToAuthor = typeof obj.persistToAuthor === 'boolean' ? obj.persistToAuthor : false;
   const config = pickAllowedScreenshotConfig(obj.config);
 
   if ((type === 'retake_screenshot_remove_selector' || type === 'retake_author_remove_selector') && !selector) {
@@ -96,6 +97,29 @@ export async function POST(request: NextRequest) {
     .single();
   if (templateError || !template) {
     return json({ error: templateError?.message || 'Template not found' }, 404);
+  }
+
+  if (persistToAuthor && selector) {
+    const authorId = (template.author_id as string | null) || null;
+    const authorName = (template.author_name as string | null) || null;
+    if (authorId) {
+      // Best effort: infer selector_type from prefix if not explicit
+      const selectorType = selector.startsWith('#')
+        ? 'selector'
+        : selector.startsWith('.')
+          ? 'selector'
+          : 'class';
+      await supabaseAdmin
+        .from('author_screenshot_exclusions')
+        .upsert({
+          author_id: authorId,
+          author_name: authorName,
+          selector,
+          selector_type: selectorType,
+          is_active: true,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'author_id,selector' });
+    }
   }
 
   const createdByEmail = (admin.user.email || '').toLowerCase();

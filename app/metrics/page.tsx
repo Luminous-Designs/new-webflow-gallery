@@ -56,6 +56,7 @@ interface ChartDataPoint {
 interface ContainerMetric {
   id: string;
   name: string;
+  fqdn: string | null;
   cpuChart: string | null;
   memChart: string | null;
   cpuPercent: number;
@@ -376,12 +377,19 @@ function ContainerList({ containers }: { containers: ContainerMetric[] }) {
             border: `1px solid ${COLORS.border}`,
           }}
         >
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <Container size={16} style={{ color: CHART_COLORS[index % CHART_COLORS.length] }} />
-              <span className="font-medium text-sm" style={{ color: COLORS.text }}>
-                {container.name}
-              </span>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <Container size={16} className="flex-shrink-0" style={{ color: CHART_COLORS[index % CHART_COLORS.length] }} />
+              <div className="min-w-0 flex-1">
+                <span className="font-medium text-sm block truncate" style={{ color: COLORS.text }}>
+                  {container.name}
+                </span>
+                {container.fqdn && (
+                  <span className="text-xs block truncate" style={{ color: COLORS.textMuted }}>
+                    {container.fqdn}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
@@ -476,43 +484,51 @@ function Dashboard({ password }: { password: string }) {
         for (const result of results) {
           if (result.error) continue;
 
-          const chartData: ChartDataPoint[] = result.data.data.map((point: number[]) => {
-            const values = point.slice(1);
-            const sum = values.reduce((a: number, b: number) => a + (b || 0), 0);
-            return { time: point[0], value: Math.abs(sum) };
-          });
-
           switch (result.chart) {
-            case 'system.cpu':
-              setCpuData(chartData);
+            case 'system.cpu': {
+              // CPU: sum all values (user, system, nice, iowait, etc.)
+              const cpuChartData: ChartDataPoint[] = result.data.data.map((point: number[]) => {
+                const values = point.slice(1);
+                const sum = values.reduce((a: number, b: number) => a + (b || 0), 0);
+                return { time: point[0], value: Math.abs(sum) };
+              });
+              setCpuData(cpuChartData);
               break;
-            case 'system.ram':
-              // Convert to percentage
-              if (systemInfo) {
-                const totalRam = parseInt(systemInfo.ram_total) / (1024 * 1024 * 1024); // GB
-                setRamData(
-                  chartData.map((d) => ({
-                    ...d,
-                    value: (d.value / 1024 / totalRam) * 100,
-                  }))
-                );
-              } else {
-                setRamData(chartData);
-              }
+            }
+            case 'system.ram': {
+              // RAM labels: ["time", "free", "used", "cached", "buffers"]
+              // We only want "used" (index 2) for actual memory usage
+              const totalRamGB = systemInfo
+                ? parseInt(systemInfo.ram_total) / (1024 * 1024 * 1024)
+                : 7.75; // Fallback
+              const ramChartData: ChartDataPoint[] = result.data.data.map((point: number[]) => {
+                const usedMB = point[2] || 0; // "used" is at index 2
+                const percentage = (usedMB / 1024 / totalRamGB) * 100;
+                return { time: point[0], value: Math.min(percentage, 100) };
+              });
+              setRamData(ramChartData);
               break;
-            case 'system.net':
-              // Convert to Mbps
-              setNetworkData(
-                chartData.map((d) => ({
-                  ...d,
-                  value: d.value / 1000, // kbps to Mbps
-                }))
-              );
+            }
+            case 'system.net': {
+              // Network: sum received + sent, convert to Mbps
+              const netChartData: ChartDataPoint[] = result.data.data.map((point: number[]) => {
+                const values = point.slice(1);
+                const sum = values.reduce((a: number, b: number) => a + Math.abs(b || 0), 0);
+                return { time: point[0], value: sum / 1000 }; // kbps to Mbps
+              });
+              setNetworkData(netChartData);
               break;
-            case 'disk.sda':
-              // Already in proper format
-              setDiskData(chartData);
+            }
+            case 'disk.sda': {
+              // Disk I/O: sum read + write
+              const diskChartData: ChartDataPoint[] = result.data.data.map((point: number[]) => {
+                const values = point.slice(1);
+                const sum = values.reduce((a: number, b: number) => a + Math.abs(b || 0), 0);
+                return { time: point[0], value: sum };
+              });
+              setDiskData(diskChartData);
               break;
+            }
           }
         }
         setLastUpdate(new Date());

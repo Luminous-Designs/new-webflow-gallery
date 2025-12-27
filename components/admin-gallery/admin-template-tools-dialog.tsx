@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ScreenshotSettingsPanel, DEFAULT_SCREENSHOT_SETTINGS, type ScreenshotSettings } from '@/components/admin-gallery/screenshot-settings';
+import { Switch } from '@/components/ui/switch';
 
 const STORAGE_KEY = 'admin_screenshot_settings_v1';
 
@@ -46,6 +47,7 @@ export function AdminTemplateToolsDialog({
   const [settings, setSettings] = useState<ScreenshotSettings>(DEFAULT_SCREENSHOT_SETTINGS);
 
   const [selector, setSelector] = useState('');
+  const [persistForAuthor, setPersistForAuthor] = useState(true);
   const [selectorValidation, setSelectorValidation] = useState<
     | { state: 'idle' }
     | { state: 'validating' }
@@ -95,6 +97,7 @@ export function AdminTemplateToolsDialog({
   }, [open, settings]);
 
   const canFeatureAuthor = Boolean(template?.author_id && template?.author_name);
+  const canPersistAuthor = Boolean(template?.author_id);
 
   const enqueue = async (type: string, extra: Record<string, unknown>) => {
     if (!template) return;
@@ -298,15 +301,31 @@ export function AdminTemplateToolsDialog({
                   <div className="text-xs text-muted-foreground">{selectorSummary}</div>
                 </div>
 
+                {canPersistAuthor ? (
+                  <div className="flex items-center justify-between gap-3 rounded-md border p-3">
+                    <div className="space-y-0.5">
+                      <div className="text-sm font-medium">Persist for author</div>
+                      <div className="text-xs text-muted-foreground">
+                        Save this removal rule for this author so future scrapes automatically remove it before screenshotting.
+                      </div>
+                    </div>
+                    <Switch checked={persistForAuthor} onCheckedChange={setPersistForAuthor} />
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">
+                    This template has no author id, so the removal rule cannot be persisted for future scrapes.
+                  </div>
+                )}
+
                 <div className="flex flex-wrap gap-2">
                   {selectorValidation.state === 'valid' ? (
                     <>
-                      <Button onClick={() => enqueue('retake_screenshot_remove_selector', { selector: selector.trim() })}>
+                      <Button onClick={() => enqueue('retake_screenshot_remove_selector', { selector: selector.trim(), persistToAuthor: persistForAuthor && canPersistAuthor })}>
                         Re-take This Template (remove)
                       </Button>
                       <Button
                         variant="secondary"
-                        onClick={() => enqueue('retake_author_remove_selector', { selector: selector.trim() })}
+                        onClick={() => enqueue('retake_author_remove_selector', { selector: selector.trim(), persistToAuthor: persistForAuthor && canPersistAuthor })}
                         disabled={!template.author_id}
                       >
                         Re-take All by Author (remove)

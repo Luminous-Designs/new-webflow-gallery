@@ -388,6 +388,11 @@ export class FreshScraper extends EventEmitter {
   private screenshotExclusionsFetchedAt: number = 0;
   private screenshotExclusionsTtlMs: number = 60_000;
 
+  // Cached author-specific screenshot exclusions (applied only when author_id matches)
+  private authorScreenshotExclusionsByAuthorId: Map<string, string[]> = new Map();
+  private authorScreenshotExclusionsFetchedAt: number = 0;
+  private authorScreenshotExclusionsTtlMs: number = 60_000;
+
   private templateIndex: Map<string, {
     id: number;
     name: string | null;
@@ -504,6 +509,8 @@ export class FreshScraper extends EventEmitter {
     } else {
       this.templateIndex = new Map();
     }
+
+    await this.getAuthorScreenshotExclusionSelectors(true);
 
     this.log('info', `Initialized with ${this.featuredAuthorIds.size} featured authors`);
   }
@@ -656,6 +663,65 @@ export class FreshScraper extends EventEmitter {
       this.log('warn', `Failed to fetch screenshot exclusions: ${error}`);
     }
     return this.screenshotExclusionSelectors;
+  }
+
+  private normalizeSelector(selector: string, selectorType: string): string | null {
+    const sel = String(selector || '').trim();
+    if (!sel) return null;
+    const type = String(selectorType || 'selector');
+    if (type === 'class' && !sel.startsWith('.')) return `.${sel}`;
+    if (type === 'id' && !sel.startsWith('#')) return `#${sel}`;
+    return sel;
+  }
+
+  private async getAuthorScreenshotExclusionSelectors(forceRefresh: boolean = false): Promise<Map<string, string[]>> {
+    const now = Date.now();
+    if (!forceRefresh &&
+        this.authorScreenshotExclusionsByAuthorId.size > 0 &&
+        now - this.authorScreenshotExclusionsFetchedAt < this.authorScreenshotExclusionsTtlMs) {
+      return this.authorScreenshotExclusionsByAuthorId;
+    }
+
+    const map = new Map<string, string[]>();
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('author_screenshot_exclusions')
+        .select('author_id, selector, selector_type')
+        .eq('is_active', true);
+      if (error) throw error;
+
+      for (const row of data || []) {
+        const authorId = (row.author_id as string | null) || '';
+        if (!authorId) continue;
+        const normalized = this.normalizeSelector(
+          (row.selector as string | null) || '',
+          (row.selector_type as string | null) || 'selector'
+        );
+        if (!normalized) continue;
+        const existing = map.get(authorId) || [];
+        existing.push(normalized);
+        map.set(authorId, existing);
+      }
+    } catch (error) {
+      this.log('warn', `Failed to fetch author screenshot exclusions: ${error}`);
+    }
+
+    // Dedupe per author
+    for (const [authorId, sels] of map.entries()) {
+      map.set(authorId, Array.from(new Set(sels)));
+    }
+
+    this.authorScreenshotExclusionsByAuthorId = map;
+    this.authorScreenshotExclusionsFetchedAt = now;
+    return this.authorScreenshotExclusionsByAuthorId;
+  }
+
+  private async getEffectiveScreenshotSelectors(baseSelectors: string[], authorId: string | null | undefined): Promise<string[]> {
+    if (!authorId) return baseSelectors;
+    const map = await this.getAuthorScreenshotExclusionSelectors(false);
+    const authorSelectors = map.get(authorId) || [];
+    if (!authorSelectors.length) return baseSelectors;
+    return Array.from(new Set([...baseSelectors, ...authorSelectors]));
   }
 
   private withCacheBuster(url: string): string {
@@ -1484,11 +1550,13 @@ export class FreshScraper extends EventEmitter {
           }
         }
 
+        const effectiveSelectors = await this.getEffectiveScreenshotSelectors(screenshotSelectors, entry.author_id);
+
         await preparePageForScreenshot(page, {
           loadTimeoutMs: this.config.timeout,
           animationWaitMs: this.config.screenshotAnimationWaitMs,
           scrollDelayMs: 150,
-          elementsToRemove: screenshotSelectors,
+          elementsToRemove: effectiveSelectors,
           enableScroll: false,
           nudgeScrollRatio: this.config.screenshotNudgeScrollRatio,
           nudgeWaitMs: this.config.screenshotNudgeWaitMs,
@@ -1799,11 +1867,13 @@ export class FreshScraper extends EventEmitter {
           }
         }
 
+        const effectiveSelectors = await this.getEffectiveScreenshotSelectors(screenshotSelectors, data.authorId);
+
         await preparePageForScreenshot(page, {
           loadTimeoutMs: this.config.timeout,
           animationWaitMs: this.config.screenshotAnimationWaitMs,
           scrollDelayMs: 150,
-          elementsToRemove: screenshotSelectors,
+          elementsToRemove: effectiveSelectors,
           enableScroll: false,
           nudgeScrollRatio: this.config.screenshotNudgeScrollRatio,
           nudgeWaitMs: this.config.screenshotNudgeWaitMs,

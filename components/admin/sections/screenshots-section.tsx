@@ -22,7 +22,8 @@ import {
   ToggleRight,
   Clock,
   Pencil,
-  Camera
+  Camera,
+  Users
 } from 'lucide-react';
 
 interface ScreenshotExclusion {
@@ -44,6 +45,18 @@ interface ScreenshotTestResult {
   error?: string;
 }
 
+interface AuthorScreenshotExclusion {
+  id: number;
+  author_id: string;
+  author_name: string | null;
+  selector: string;
+  selector_type: 'class' | 'id' | 'selector';
+  description?: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export function ScreenshotsSection() {
   const { resolveAuthToken } = useAdmin();
 
@@ -56,6 +69,16 @@ export function ScreenshotsSection() {
   const [isAddingExclusion, setIsAddingExclusion] = useState(false);
   const [editingExclusionId, setEditingExclusionId] = useState<number | null>(null);
   const [editingExclusionDesc, setEditingExclusionDesc] = useState('');
+
+  // Author Screenshot Exclusions state
+  const [authorExclusions, setAuthorExclusions] = useState<AuthorScreenshotExclusion[]>([]);
+  const [isLoadingAuthorExclusions, setIsLoadingAuthorExclusions] = useState(false);
+  const [newAuthorId, setNewAuthorId] = useState('');
+  const [newAuthorName, setNewAuthorName] = useState('');
+  const [newAuthorSelector, setNewAuthorSelector] = useState('');
+  const [newAuthorSelectorType, setNewAuthorSelectorType] = useState<'class' | 'id' | 'selector'>('class');
+  const [newAuthorDescription, setNewAuthorDescription] = useState('');
+  const [isAddingAuthorExclusion, setIsAddingAuthorExclusion] = useState(false);
 
   // Screenshot Test state
   const [screenshotTestUrl, setScreenshotTestUrl] = useState('');
@@ -78,6 +101,23 @@ export function ScreenshotsSection() {
       console.error('Failed to load screenshot exclusions:', error);
     } finally {
       setIsLoadingExclusions(false);
+    }
+  }, [resolveAuthToken]);
+
+  const loadAuthorExclusions = useCallback(async () => {
+    try {
+      setIsLoadingAuthorExclusions(true);
+      const response = await fetch('/api/admin/author-screenshot-exclusions', {
+        headers: { 'Authorization': `Bearer ${resolveAuthToken()}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setAuthorExclusions((data.exclusions || []) as AuthorScreenshotExclusion[]);
+      }
+    } catch (error) {
+      console.error('Failed to load author screenshot exclusions:', error);
+    } finally {
+      setIsLoadingAuthorExclusions(false);
     }
   }, [resolveAuthToken]);
 
@@ -177,6 +217,83 @@ export function ScreenshotsSection() {
     }
   }, [resolveAuthToken]);
 
+  const addAuthorExclusion = useCallback(async () => {
+    if (!newAuthorId.trim()) {
+      toast.error('Please enter an author id');
+      return;
+    }
+    if (!newAuthorSelector.trim()) {
+      toast.error('Please enter a selector');
+      return;
+    }
+
+    try {
+      setIsAddingAuthorExclusion(true);
+      const response = await fetch('/api/admin/author-screenshot-exclusions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${resolveAuthToken()}` },
+        body: JSON.stringify({
+          author_id: newAuthorId.trim(),
+          author_name: newAuthorName.trim() || undefined,
+          selector: newAuthorSelector.trim(),
+          selector_type: newAuthorSelectorType,
+          description: newAuthorDescription.trim() || undefined
+        })
+      });
+
+      const data = await response.json();
+      if (response.ok) {
+        setAuthorExclusions(prev => [data.exclusion, ...prev]);
+        setNewAuthorId('');
+        setNewAuthorName('');
+        setNewAuthorSelector('');
+        setNewAuthorDescription('');
+        toast.success('Author exclusion added');
+      } else {
+        toast.error(data.error || 'Failed to add author exclusion');
+      }
+    } catch {
+      toast.error('Failed to add author exclusion');
+    } finally {
+      setIsAddingAuthorExclusion(false);
+    }
+  }, [resolveAuthToken, newAuthorId, newAuthorName, newAuthorSelector, newAuthorSelectorType, newAuthorDescription]);
+
+  const toggleAuthorExclusion = useCallback(async (id: number, isActive: boolean) => {
+    try {
+      const response = await fetch('/api/admin/author-screenshot-exclusions', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${resolveAuthToken()}` },
+        body: JSON.stringify({ id, is_active: !isActive })
+      });
+      if (response.ok) {
+        setAuthorExclusions(prev => prev.map(e => e.id === id ? { ...e, is_active: !isActive } : e));
+        toast.success(isActive ? 'Author exclusion disabled' : 'Author exclusion enabled');
+      } else {
+        toast.error('Failed to update author exclusion');
+      }
+    } catch {
+      toast.error('Failed to update author exclusion');
+    }
+  }, [resolveAuthToken]);
+
+  const deleteAuthorExclusion = useCallback(async (id: number) => {
+    try {
+      const response = await fetch(`/api/admin/author-screenshot-exclusions?id=${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${resolveAuthToken()}` }
+      });
+      if (response.ok) {
+        setAuthorExclusions(prev => prev.filter(e => e.id !== id));
+        toast.success('Author exclusion deleted');
+      } else {
+        toast.error('Failed to delete author exclusion');
+      }
+    } catch {
+      toast.error('Failed to delete author exclusion');
+    }
+  }, [resolveAuthToken]);
+
   // Run screenshot test
   const runScreenshotTest = useCallback(async () => {
     if (!screenshotTestUrl.trim()) {
@@ -213,9 +330,23 @@ export function ScreenshotsSection() {
   // Load exclusions on mount
   useState(() => {
     loadScreenshotExclusions();
+    loadAuthorExclusions();
   });
 
   const activeExclusionsCount = useMemo(() => screenshotExclusions.filter(e => e.is_active).length, [screenshotExclusions]);
+  const activeAuthorExclusionsCount = useMemo(() => authorExclusions.filter(e => e.is_active).length, [authorExclusions]);
+
+  const authorGroups = useMemo(() => {
+    const map = new Map<string, { authorId: string; authorName: string | null; items: AuthorScreenshotExclusion[] }>();
+    for (const exc of authorExclusions) {
+      const authorId = exc.author_id || 'unknown';
+      const existing = map.get(authorId) || { authorId, authorName: exc.author_name || null, items: [] };
+      if (!existing.authorName && exc.author_name) existing.authorName = exc.author_name;
+      existing.items.push(exc);
+      map.set(authorId, existing);
+    }
+    return Array.from(map.values()).sort((a, b) => (a.authorName || a.authorId).localeCompare(b.authorName || b.authorId));
+  }, [authorExclusions]);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -329,6 +460,127 @@ export function ScreenshotsSection() {
             <strong>Tip:</strong> Use class names like <code className="bg-gray-200 px-1 rounded">cookie-banner</code> or IDs like <code className="bg-gray-200 px-1 rounded">popup-overlay</code>
           </div>
         </div>
+      </Card>
+
+      {/* Author Element Exclusions Card */}
+      <Card className="p-6 border-2 border-sky-100 bg-gradient-to-br from-sky-50/30 to-white">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="p-2 bg-sky-100 rounded-lg">
+            <Users className="h-6 w-6 text-sky-600" />
+          </div>
+          <div>
+            <h2 className="text-xl font-semibold">Author Exclusions</h2>
+            <p className="text-sm text-gray-500">Per-author removal rules applied automatically during future scrapes</p>
+          </div>
+        </div>
+
+        {/* Add New Author Exclusion */}
+        <div className="p-4 bg-white border rounded-lg mb-4 space-y-3">
+          <h3 className="font-medium text-sm text-gray-700">Add New Author Exclusion</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <Input placeholder="author_id (required)" value={newAuthorId} onChange={(e) => setNewAuthorId(e.target.value)} />
+            <Input placeholder="author_name (optional)" value={newAuthorName} onChange={(e) => setNewAuthorName(e.target.value)} />
+          </div>
+          <div className="flex gap-2">
+            <Select value={newAuthorSelectorType} onValueChange={(v: 'class' | 'id' | 'selector') => setNewAuthorSelectorType(v)}>
+              <SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="class">Class</SelectItem>
+                <SelectItem value="id">ID</SelectItem>
+                <SelectItem value="selector">Selector</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              placeholder={newAuthorSelectorType === 'class' ? 'pop-up-marketing' : newAuthorSelectorType === 'id' ? 'cookie-notice' : '.cookie-banner, #chat'}
+              value={newAuthorSelector}
+              onChange={(e) => setNewAuthorSelector(e.target.value)}
+              className="flex-1"
+            />
+          </div>
+          <Input placeholder="Description (optional)" value={newAuthorDescription} onChange={(e) => setNewAuthorDescription(e.target.value)} />
+          <Button onClick={addAuthorExclusion} disabled={isAddingAuthorExclusion || !newAuthorId.trim() || !newAuthorSelector.trim()} className="w-full">
+            {isAddingAuthorExclusion ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Plus className="h-4 w-4 mr-2" />}
+            Add Author Exclusion
+          </Button>
+        </div>
+
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <h3 className="font-medium text-sm text-gray-700">Configured Authors</h3>
+            <Badge variant="outline" className="text-xs">{activeAuthorExclusionsCount} active</Badge>
+          </div>
+          <Button variant="ghost" size="sm" onClick={loadAuthorExclusions} disabled={isLoadingAuthorExclusions}>
+            {isLoadingAuthorExclusions ? <Loader2 className="h-3 w-3 animate-spin" /> : <span className="text-xs">Refresh</span>}
+          </Button>
+        </div>
+
+        <ScrollArea className="h-[420px] rounded-lg border bg-white">
+          {authorGroups.length === 0 ? (
+            <div className="p-4 text-center text-gray-500 text-sm">No author exclusions configured yet.</div>
+          ) : (
+            <div className="p-2 space-y-3">
+              {authorGroups.map((group) => (
+                <div key={group.authorId} className="rounded-lg border p-3 bg-white">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="min-w-0">
+                      <div className="font-medium text-sm truncate">{group.authorName || 'Unknown author'}</div>
+                      <div className="text-xs text-gray-500 font-mono truncate">{group.authorId}</div>
+                    </div>
+                    <Badge variant="secondary" className="text-xs">
+                      {group.items.filter(i => i.is_active).length}/{group.items.length}
+                    </Badge>
+                  </div>
+
+                  <div className="space-y-2">
+                    {group.items.map((exclusion) => (
+                      <div
+                        key={exclusion.id}
+                        className={`p-2 rounded border ${exclusion.is_active ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200 opacity-60'}`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <Badge variant="outline" className={`text-xs ${
+                                exclusion.selector_type === 'class' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                                exclusion.selector_type === 'id' ? 'bg-purple-50 text-purple-700 border-purple-200' :
+                                'bg-gray-50 text-gray-700 border-gray-200'
+                              }`}>
+                                {exclusion.selector_type}
+                              </Badge>
+                              <code className="text-xs font-mono truncate">{exclusion.selector}</code>
+                            </div>
+                            {exclusion.description ? (
+                              <p className="text-xs text-gray-500 mt-1">{exclusion.description}</p>
+                            ) : null}
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-8 w-8 p-0"
+                              onClick={() => toggleAuthorExclusion(exclusion.id, exclusion.is_active)}
+                              title={exclusion.is_active ? 'Disable' : 'Enable'}
+                            >
+                              {exclusion.is_active ? <ToggleRight className="h-4 w-4 text-green-600" /> : <ToggleLeft className="h-4 w-4 text-gray-400" />}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-8 w-8 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
+                              onClick={() => { if (confirm('Delete this author exclusion?')) deleteAuthorExclusion(exclusion.id); }}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </ScrollArea>
       </Card>
 
       {/* Screenshot Test Card */}

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 
 // Netdata URL - defaults to Coolify network gateway which can access host services
 const NETDATA_URL = process.env.NETDATA_URL || 'http://10.0.1.1:19999';
+// Container mapping service URL
+const CONTAINER_MAPPING_URL = process.env.CONTAINER_MAPPING_URL || 'http://10.0.1.1:19998/container-mapping.json';
 const METRICS_PASSWORD = process.env.METRICS_PASSWORD || process.env.ADMIN_PASSWORD;
 
 function verifyAuth(request: NextRequest): boolean {
@@ -25,9 +27,42 @@ interface ChartsResponse {
 export interface ContainerInfo {
   id: string;
   name: string;
+  fqdn: string | null;
   cpuChart: string | null;
   memChart: string | null;
   netChart: string | null;
+}
+
+// Fetch container name mapping from the host
+async function fetchContainerMapping(): Promise<Record<string, string>> {
+  try {
+    const response = await fetch(CONTAINER_MAPPING_URL, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(2000), // 2 second timeout
+    });
+    if (response.ok) {
+      return await response.json();
+    }
+  } catch (error) {
+    console.warn('Failed to fetch container mapping:', error);
+  }
+  return {};
+}
+
+// Extract a display name from the FQDN
+function extractDisplayName(fqdn: string): string {
+  // Remove common suffixes and extract meaningful part
+  const cleaned = fqdn
+    .replace(/\.178\.156\.177\.252\.sslip\.io$/i, '') // Remove sslip.io suffix
+    .replace(/\.luminardigital\.com$/i, ''); // Remove main domain
+
+  // If it's still a hash-like string, shorten it
+  if (cleaned.match(/^[a-z0-9]{15,}$/i)) {
+    return cleaned.substring(0, 8) + '...';
+  }
+
+  // Capitalize first letter for better display
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
 }
 
 export async function GET(request: NextRequest) {
@@ -36,10 +71,11 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Fetch all charts to find container-related ones
-    const chartsResponse = await fetch(`${NETDATA_URL}/api/v1/charts`, {
-      cache: 'no-store',
-    });
+    // Fetch container mapping and charts in parallel
+    const [containerMapping, chartsResponse] = await Promise.all([
+      fetchContainerMapping(),
+      fetch(`${NETDATA_URL}/api/v1/charts`, { cache: 'no-store' }),
+    ]);
 
     if (!chartsResponse.ok) {
       throw new Error('Failed to fetch charts');
@@ -64,20 +100,34 @@ export async function GET(request: NextRequest) {
       const [, containerId, chartType] = match;
 
       if (!containersMap.has(containerId)) {
-        // Try to extract a friendly name
+        // Look up friendly name from mapping
+        // The mapping uses full container names which include deployment IDs
+        // Container IDs in Netdata might be slightly different (no deployment suffix)
+        let fqdn: string | null = null;
         let friendlyName = containerId;
 
-        // Common Coolify patterns
-        if (containerId.startsWith('coolify')) {
+        // Try to find a matching entry in the mapping
+        for (const [fullName, mappedFqdn] of Object.entries(containerMapping)) {
+          // Check if the container ID matches the start of any mapped container name
+          if (fullName.startsWith(containerId) || containerId.startsWith(fullName.split('-')[0])) {
+            fqdn = mappedFqdn;
+            break;
+          }
+        }
+
+        // Determine display name
+        if (fqdn) {
+          friendlyName = extractDisplayName(fqdn);
+        } else if (containerId.startsWith('coolify')) {
           friendlyName = containerId;
-        } else if (containerId.match(/^[a-z0-9]{20,}/i)) {
-          // Long hash-like IDs - try to shorten
-          friendlyName = containerId.substring(0, 12) + '...';
+        } else if (containerId.match(/^[a-z0-9]{15,}/i)) {
+          friendlyName = containerId.substring(0, 8) + '...';
         }
 
         containersMap.set(containerId, {
           id: containerId,
           name: friendlyName,
+          fqdn: fqdn,
           cpuChart: null,
           memChart: null,
           netChart: null,
