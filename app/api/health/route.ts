@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase';
+import { supabase, supabaseAdmin } from '@/lib/supabase';
 
 function extractProjectRef(url: string | null | undefined): string | null {
   if (!url) return null;
@@ -28,6 +28,18 @@ export async function GET() {
       projectRef: extractProjectRef(process.env.NEXT_PUBLIC_SUPABASE_URL),
     };
 
+    // Validate the *public* API key too, since auth uses it (not service role).
+    let publicApiKeyOk: boolean | null = null;
+    let publicApiKeyError: string | null = null;
+    try {
+      const { error } = await supabase.from('templates').select('id').limit(1);
+      publicApiKeyOk = !error;
+      publicApiKeyError = error?.message || null;
+    } catch (e) {
+      publicApiKeyOk = false;
+      publicApiKeyError = e instanceof Error ? e.message : 'Unknown error';
+    }
+
     if (!databaseOk) {
       return NextResponse.json({
         status: 'unhealthy',
@@ -35,6 +47,8 @@ export async function GET() {
         database: 'disconnected',
         error: countError?.message || 'Database connection failed',
         env,
+        publicApiKeyOk,
+        publicApiKeyError,
       }, { status: 503 });
     }
 
@@ -47,6 +61,8 @@ export async function GET() {
       node: process.version,
       uptime: process.uptime(),
       env,
+      publicApiKeyOk,
+      publicApiKeyError,
     });
   } catch (error) {
     console.error('Health check failed:', error);
