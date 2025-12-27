@@ -27,7 +27,9 @@ const TEMPLATE_CARD_SELECT = `
   alternate_homepage_path,
   scraped_at,
   created_at,
-  updated_at
+  updated_at,
+  primary_category,
+  webflow_subcategories
 `;
 
 type TemplateRow = Record<string, unknown> & { id: number; author_id?: string | null };
@@ -138,6 +140,11 @@ export async function GET(request: NextRequest) {
     const featured = searchParams.get('featured') === 'true';
     const collection = searchParams.get('collection');
 
+    // New category filters (supports multiple values comma-separated)
+    const primaryCategories = searchParams.get('primaryCategory')?.split(',').filter(Boolean) || [];
+    const webflowSubcategories = searchParams.get('webflowSubcategory')?.split(',').filter(Boolean) || [];
+    const hasNewCategoryFilters = primaryCategories.length > 0 || webflowSubcategories.length > 0;
+
     const featuredAuthorIds = await getFeaturedAuthorIdSet();
     const featuredAuthorIdList = Array.from(featuredAuthorIds);
     const prioritizeFeaturedAuthors = !featured && !author && collection !== 'ultra' && featuredAuthorIdList.length > 0;
@@ -202,7 +209,54 @@ export async function GET(request: NextRequest) {
     let templates: TemplateRow[] = [];
     let total = 0;
 
-    if (subcategory) {
+    // Handle new category filters (primary_category and webflow_subcategories arrays)
+    if (hasNewCategoryFilters) {
+      // Build count query
+      let countQuery = supabaseAdmin.from('templates').select('id', { count: 'exact', head: true });
+
+      // Apply array contains filters for each selected category
+      for (const category of primaryCategories) {
+        countQuery = countQuery.contains('primary_category', [category]);
+      }
+      for (const subcategory of webflowSubcategories) {
+        countQuery = countQuery.contains('webflow_subcategories', [subcategory]);
+      }
+
+      if (author) countQuery = countQuery.eq('author_id', author);
+      if (applyFeaturedFilter) {
+        countQuery = countQuery.in('author_id', featuredAuthorIdList);
+      }
+
+      const { count, error: countError } = await countQuery;
+      if (countError) throw countError;
+      total = count || 0;
+
+      if (offset >= total) {
+        templates = [];
+      } else {
+        // Build data query
+        let query = supabaseAdmin.from('templates').select(TEMPLATE_CARD_SELECT);
+
+        // Apply array contains filters
+        for (const category of primaryCategories) {
+          query = query.contains('primary_category', [category]);
+        }
+        for (const subcategory of webflowSubcategories) {
+          query = query.contains('webflow_subcategories', [subcategory]);
+        }
+
+        if (author) query = query.eq('author_id', author);
+        if (applyFeaturedFilter) {
+          query = query.in('author_id', featuredAuthorIdList);
+        }
+
+        const { data, error } = await query
+          .order('created_at', { ascending: false })
+          .range(offset, offset + limit - 1);
+        if (error) throw error;
+        templates = (data || []) as TemplateRow[];
+      }
+    } else if (subcategory) {
       const { data: subcat, error: subcatError } = await supabaseAdmin
         .from('subcategories')
         .select('id')

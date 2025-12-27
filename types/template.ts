@@ -13,6 +13,8 @@ export interface Template {
   screenshot_path?: string;
   subcategories: string[];
   styles: string[];
+  primary_category?: string[];
+  webflow_subcategories?: string[];
   is_featured_author?: boolean;
   position?: number;
   created_at?: string;

@@ -24,6 +24,9 @@ export interface SupabaseTemplateUpsertPayload {
     alternate_homepage_path: string | null;
     scraped_at: string;
     updated_at: string;
+    // New Webflow category fields (stored directly on template as text arrays)
+    primary_category?: string[] | null;
+    webflow_subcategories?: string[] | null;
   };
   subcategories: string[];
   styles: string[];

@@ -52,6 +52,25 @@ const CHROMIUM_LAUNCH_ARGS = [
 ] as const;
 
 // Types
+interface ScrapedData {
+  name: string;
+  authorId: string | null;
+  authorName: string | null;
+  authorAvatar: string | null;
+  livePreviewUrl: string;
+  designerPreviewUrl: string;
+  price: string;
+  shortDescription: string;
+  longDescription: string;
+  subcategories: string[];
+  styles: string[];
+  features: string[];
+  isCms: boolean;
+  isEcommerce: boolean;
+  primaryCategory: string[];
+  webflowSubcategories: string[];
+}
+
 export interface FreshScraperConfig {
   jobMode?: 'full' | 'screenshots_only';
   concurrency: number;
@@ -1455,6 +1474,32 @@ export class FreshScraper extends EventEmitter {
         const longDescEl = document.querySelector('.product-details_content') || document.querySelector('[class*=\"details\"]');
         const longDescription = longDescEl?.innerHTML || '';
 
+        // Extract PRIMARY CATEGORIES from /templates/category/ links
+        // These are the main categories like "Travel", "Architecture & Design"
+        const primaryCategory: string[] = [];
+        document.querySelectorAll('a[href*="/templates/category/"]').forEach(el => {
+          // Filter out "Browse all" buttons by checking classes
+          const classes = el.className || '';
+          if (classes.includes('button')) return;
+          const text = el.textContent?.trim();
+          // Filter out "Browse all" navigation links
+          if (text && !primaryCategory.includes(text) && text.toLowerCase() !== 'browse all') {
+            primaryCategory.push(text);
+          }
+        });
+
+        // Extract WEBFLOW SUBCATEGORIES from /templates/subcategory/ links
+        // These are more specific like "Hotels & Lodging", "Interior Design"
+        const webflowSubcategories: string[] = [];
+        document.querySelectorAll('a[href*="/templates/subcategory/"]').forEach(el => {
+          const text = el.textContent?.trim();
+          // Filter out "Browse all" navigation links
+          if (text && !webflowSubcategories.includes(text) && text.toLowerCase() !== 'browse all') {
+            webflowSubcategories.push(text);
+          }
+        });
+
+        // Legacy subcategories extraction (kept for backward compatibility with junction tables)
         const subcategoryEls = document.querySelectorAll('#subcategory .tag-list_link, .tag-list_link');
         const subcategories: string[] = [];
         subcategoryEls.forEach(el => {
@@ -1462,16 +1507,11 @@ export class FreshScraper extends EventEmitter {
           if (text) subcategories.push(text);
         });
 
-        const styleEls = document.querySelectorAll('.sidebar-layout_section');
+        // Extract STYLES from /templates/style/ links
         const styles: string[] = [];
-        styleEls.forEach(section => {
-          const heading = section.querySelector('h4, h5');
-          if (heading?.textContent?.toLowerCase().includes('style')) {
-            section.querySelectorAll('.tag-list_link').forEach(el => {
-              const text = el.textContent?.trim();
-              if (text) styles.push(text);
-            });
-          }
+        document.querySelectorAll('a[href*="/templates/style/"]').forEach(el => {
+          const text = el.textContent?.trim();
+          if (text && !styles.includes(text)) styles.push(text);
         });
 
         const features: string[] = [];
@@ -1501,9 +1541,11 @@ export class FreshScraper extends EventEmitter {
           styles,
           features,
           isCms,
-          isEcommerce
+          isEcommerce,
+          primaryCategory,
+          webflowSubcategories
         };
-      });
+      }) as ScrapedData;
 
       if (!data.livePreviewUrl) {
         throw new Error('No live preview URL found');
@@ -1713,6 +1755,13 @@ export class FreshScraper extends EventEmitter {
         alternate_homepage_path: result.alternateHomepagePath,
         scraped_at: now,
         updated_at: now,
+        // New Webflow category fields
+        primary_category: Array.isArray((data as ScrapedData).primaryCategory) && (data as ScrapedData).primaryCategory.length > 0
+          ? (data as ScrapedData).primaryCategory
+          : null,
+        webflow_subcategories: Array.isArray((data as ScrapedData).webflowSubcategories) && (data as ScrapedData).webflowSubcategories.length > 0
+          ? (data as ScrapedData).webflowSubcategories
+          : null,
       },
       subcategories: Array.isArray(data.subcategories) ? data.subcategories : [],
       styles: Array.isArray(data.styles) ? data.styles : [],

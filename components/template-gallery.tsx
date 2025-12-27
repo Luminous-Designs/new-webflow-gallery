@@ -9,17 +9,32 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { motion } from 'framer-motion';
-import { Eye, X, Loader2, Search, Sparkles, ExternalLink, Calendar, User } from 'lucide-react';
+import { Eye, X, Loader2, Search, Sparkles, ExternalLink, Calendar, User, Star, ChevronDown, ChevronUp } from 'lucide-react';
 import Image from 'next/image';
 import { useInView } from '@/hooks/useInView';
 import TemplatePreview from './template-preview';
 import type { Template } from '@/types/template';
 import { toAssetUrl } from '@/lib/assets';
 
-// Cache for subcategories and styles (persists across component re-renders)
-const metadataCache = {
-  subcategories: null as {id: number; name: string; slug: string; display_name: string; template_count: number}[] | null,
-  styles: null as {id: number; name: string; slug: string; display_name: string; template_count: number}[] | null,
+// Types for categories
+interface CategoryItem {
+  name: string;
+  slug: string;
+  display_name: string;
+  template_count: number;
+  type: 'primary' | 'subcategory';
+}
+
+interface SelectedFilter {
+  name: string;
+  slug: string;
+  type: 'primary' | 'subcategory';
+}
+
+// Cache for categories (persists across component re-renders)
+const categoryCache = {
+  primaryCategories: null as CategoryItem[] | null,
+  webflowSubcategories: null as CategoryItem[] | null,
   lastFetched: 0,
   CACHE_DURATION: 5 * 60 * 1000, // 5 minutes
 };
@@ -32,9 +47,8 @@ interface TemplateCardProps {
   template: Template;
   onPreview: (template: Template) => void;
   onAuthorClick: (authorId: string, authorName: string) => void;
-  /** Whether this image should be loaded with priority (for above-the-fold content) */
+  onCategoryClick?: (category: string, type: 'primary' | 'subcategory') => void;
   priority?: boolean;
-  /** Index of the template in the list (for lazy loading optimization) */
   index?: number;
 }
 
@@ -48,15 +62,17 @@ function formatDate(dateString?: string): string {
   });
 }
 
-function TemplateCard({ template, onPreview, onAuthorClick, priority = false, index = 0 }: TemplateCardProps) {
+function TemplateCard({ template, onPreview, onAuthorClick, onCategoryClick, priority = false, index = 0 }: TemplateCardProps) {
   const [isHovered, setIsHovered] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const animationRef = useRef<NodeJS.Timeout | null>(null);
 
-  // First 6 images get priority loading (above the fold on most screens)
   const shouldPrioritize = priority || index < 6;
 
-  // Auto-scroll on hover
+  // Get the new category fields from template
+  const primaryCategories = (template as any).primary_category as string[] | null;
+  const webflowSubcategories = (template as any).webflow_subcategories as string[] | null;
+
   useEffect(() => {
     if (isHovered && scrollRef.current) {
       const element = scrollRef.current;
@@ -178,9 +194,39 @@ function TemplateCard({ template, onPreview, onAuthorClick, priority = false, in
             )}
           </div>
 
-          {/* Author and Date - Horizontal Layout */}
+          {/* Categories Display */}
+          {(primaryCategories?.length || webflowSubcategories?.length) && (
+            <div className="flex flex-wrap gap-1.5">
+              {primaryCategories?.slice(0, 2).map((cat) => (
+                <button
+                  key={cat}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCategoryClick?.(cat, 'primary');
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium hover:bg-amber-100 transition-colors"
+                >
+                  <Star className="h-2.5 w-2.5 fill-amber-500 text-amber-500" />
+                  {cat}
+                </button>
+              ))}
+              {webflowSubcategories?.slice(0, 2).map((subcat) => (
+                <button
+                  key={subcat}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCategoryClick?.(subcat, 'subcategory');
+                  }}
+                  className="inline-flex items-center px-2 py-0.5 bg-neutral-100 text-neutral-600 text-[10px] font-medium hover:bg-neutral-200 transition-colors"
+                >
+                  {subcat}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Author and Date */}
           <div className="flex items-center justify-between text-sm">
-            {/* Author - Clickable */}
             <button
               onClick={handleAuthorClick}
               className="flex items-center gap-1.5 text-neutral-600 hover:text-neutral-900 transition-colors group/author"
@@ -192,7 +238,6 @@ function TemplateCard({ template, onPreview, onAuthorClick, priority = false, in
               </span>
             </button>
 
-            {/* Date Published */}
             <div className="flex items-center gap-1.5 text-neutral-500">
               <Calendar className="h-3.5 w-3.5" />
               <span className="text-xs tracking-wide">{formatDate(template.created_at)}</span>
@@ -220,30 +265,25 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [pageInfo, setPageInfo] = useState({ current: 1, total: 0, hasNext: true });
-  const [selectedTag, setSelectedTag] = useState<{ slug: string; type: 'subcategory' | 'style' | '' }>({ slug: '', type: '' });
+
+  // New category state
+  const [primaryCategories, setPrimaryCategories] = useState<CategoryItem[]>([]);
+  const [webflowSubcategories, setWebflowSubcategories] = useState<CategoryItem[]>([]);
+  const [selectedFilters, setSelectedFilters] = useState<SelectedFilter[]>([]);
+  const [categorySearch, setCategorySearch] = useState('');
+  const [expandedSections, setExpandedSections] = useState({ primary: true, subcategory: true });
+
+  // Other filters
   const [selectedAuthor, setSelectedAuthor] = useState<{ id: string; name: string } | null>(null);
   const [collection, setCollection] = useState<'ultra' | 'all'>('ultra');
-  const [subcategories, setSubcategories] = useState<{id: number; name: string; slug: string; display_name: string; template_count: number}[]>([]);
-  const [styles, setStyles] = useState<{id: number; name: string; slug: string; display_name: string; template_count: number}[]>([]);
   const [previewTemplate, setPreviewTemplate] = useState<Template | null>(null);
-  const [tagSearch, setTagSearch] = useState('');
-  const [allTags, setAllTags] = useState<{
-    id: number;
-    name: string;
-    slug: string;
-    display_name: string;
-    template_count: number;
-    type: 'style' | 'subcategory';
-  }[]>([]);
 
-  // Refs for infinite scroll state management
+  // Refs for infinite scroll
   const pageRef = useRef(1);
   const hasMoreRef = useRef(true);
   const loadingRef = useRef(false);
   const lastFetchTimeRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
-
-  // Minimum delay between fetches (debounce)
   const FETCH_DEBOUNCE_MS = 200;
 
   const normalizeTemplate = (template: any): Template => ({
@@ -263,44 +303,41 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     styles: Array.isArray(template.styles) ? template.styles : [],
     is_featured_author: template.is_featured_author,
     position: template.position,
-    created_at: template.created_at
+    created_at: template.created_at,
+    // Add new fields
+    primary_category: template.primary_category,
+    webflow_subcategories: template.webflow_subcategories,
   });
 
-  // Fetch subcategories and styles with caching
+  // Fetch categories with caching
   useEffect(() => {
     const now = Date.now();
-    const isCacheValid = metadataCache.lastFetched > 0 &&
-                         (now - metadataCache.lastFetched) < metadataCache.CACHE_DURATION;
+    const isCacheValid = categoryCache.lastFetched > 0 &&
+                         (now - categoryCache.lastFetched) < categoryCache.CACHE_DURATION;
 
-    // Use cached data if valid
-    if (isCacheValid && metadataCache.subcategories && metadataCache.styles) {
-      setSubcategories(metadataCache.subcategories);
-      setStyles(metadataCache.styles);
-      setAllTags([
-        ...metadataCache.subcategories.map((cat: any) => ({ ...cat, type: 'subcategory' as const })),
-        ...metadataCache.styles.map((style: any) => ({ ...style, type: 'style' as const }))
-      ]);
+    if (isCacheValid && categoryCache.primaryCategories && categoryCache.webflowSubcategories) {
+      setPrimaryCategories(categoryCache.primaryCategories);
+      setWebflowSubcategories(categoryCache.webflowSubcategories);
       return;
     }
 
-    // Fetch fresh data
     Promise.all([
-      fetch('/api/subcategories').then(res => res.json()),
-      fetch('/api/styles').then(res => res.json())
+      fetch('/api/primary-categories').then(res => res.json()),
+      fetch('/api/webflow-subcategories').then(res => res.json())
     ])
-      .then(([subcatData, styleData]) => {
-        // Update cache
-        metadataCache.subcategories = subcatData;
-        metadataCache.styles = styleData;
-        metadataCache.lastFetched = Date.now();
+      .then(([primaryData, subcatData]) => {
+        // Handle API errors
+        if (primaryData.error || subcatData.error) {
+          console.error('Category fetch error:', primaryData.error || subcatData.error);
+          return;
+        }
 
-        // Update state
-        setSubcategories(subcatData);
-        setStyles(styleData);
-        setAllTags([
-          ...subcatData.map((cat: any) => ({ ...cat, type: 'subcategory' as const })),
-          ...styleData.map((style: any) => ({ ...style, type: 'style' as const }))
-        ]);
+        categoryCache.primaryCategories = primaryData;
+        categoryCache.webflowSubcategories = subcatData;
+        categoryCache.lastFetched = Date.now();
+
+        setPrimaryCategories(primaryData);
+        setWebflowSubcategories(subcatData);
       })
       .catch(console.error);
   }, []);
@@ -316,26 +353,30 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
       params.append('author', selectedAuthor.id);
     } else if (collection === 'ultra') {
       params.append('collection', 'ultra');
-    } else if (selectedTag.slug) {
-      if (selectedTag.type === 'subcategory') {
-        params.append('subcategory', selectedTag.slug);
-      } else if (selectedTag.type === 'style') {
-        params.append('style', selectedTag.slug);
+    } else if (selectedFilters.length > 0) {
+      // Group filters by type
+      const primaryFilters = selectedFilters.filter(f => f.type === 'primary').map(f => f.name);
+      const subcatFilters = selectedFilters.filter(f => f.type === 'subcategory').map(f => f.name);
+
+      if (primaryFilters.length > 0) {
+        params.append('primaryCategory', primaryFilters.join(','));
+      }
+      if (subcatFilters.length > 0) {
+        params.append('webflowSubcategory', subcatFilters.join(','));
       }
     }
 
     return params;
-  }, [collection, selectedTag.slug, selectedTag.type, selectedAuthor]);
+  }, [collection, selectedFilters, selectedAuthor]);
 
-  // Prefetch next page in background
+  // Prefetch next page
   const prefetchNextPage = useCallback(async (nextPage: number) => {
     const params = buildParams(nextPage);
     const cacheKey = params.toString();
 
-    // Check if already cached
     const cached = prefetchCache.get(cacheKey);
     if (cached && (Date.now() - cached.timestamp) < PREFETCH_CACHE_DURATION) {
-      return; // Already prefetched
+      return;
     }
 
     try {
@@ -343,12 +384,8 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
       const data = await response.json();
 
       if (data.templates && data.pagination) {
-        prefetchCache.set(cacheKey, {
-          data,
-          timestamp: Date.now()
-        });
+        prefetchCache.set(cacheKey, { data, timestamp: Date.now() });
 
-        // Preload images for prefetched templates
         data.templates.slice(0, 6).forEach((template: any) => {
           if (template.screenshot_path) {
             const url = toAssetUrl(template.screenshot_path);
@@ -360,24 +397,21 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
         });
       }
     } catch {
-      // Silently fail prefetch - it's not critical
+      // Silently fail
     }
   }, [buildParams]);
 
-  // Main fetch function with debouncing and abort support
+  // Main fetch function
   const fetchTemplates = useCallback(async (page: number, isReset: boolean = false) => {
-    // Prevent concurrent fetches
     if (loadingRef.current) return;
     if (!isReset && !hasMoreRef.current) return;
 
-    // Debounce rapid requests
     const now = Date.now();
     if (!isReset && (now - lastFetchTimeRef.current) < FETCH_DEBOUNCE_MS) {
       return;
     }
     lastFetchTimeRef.current = now;
 
-    // Cancel any pending request
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -394,13 +428,12 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
       const params = buildParams(page);
       const cacheKey = params.toString();
 
-      // Check prefetch cache first
       const cached = prefetchCache.get(cacheKey);
       let data: any;
 
       if (cached && (Date.now() - cached.timestamp) < PREFETCH_CACHE_DURATION) {
         data = cached.data;
-        prefetchCache.delete(cacheKey); // Consume the cache
+        prefetchCache.delete(cacheKey);
       } else {
         const response = await fetch(`/api/templates?${params}`, {
           signal: abortControllerRef.current.signal
@@ -427,20 +460,16 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
         hasNext: data.pagination.hasNext
       });
 
-      // Prefetch next page if there's more data
       if (data.pagination.hasNext) {
         const nextPage = isReset ? 2 : page + 1;
-        // Delay prefetch slightly to not compete with current render
         setTimeout(() => prefetchNextPage(nextPage + 1), 500);
       }
 
     } catch (error) {
-      // Ignore abort errors
       if (error instanceof Error && error.name === 'AbortError') {
         return;
       }
       console.error('Fetch error:', error);
-      // Stop trying to load more on error to prevent infinite retry loops
       hasMoreRef.current = false;
       setPageInfo(prev => ({ ...prev, hasNext: false }));
     } finally {
@@ -450,7 +479,7 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     }
   }, [buildParams, prefetchNextPage]);
 
-  // Cleanup abort controller on unmount
+  // Cleanup
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {
@@ -462,7 +491,7 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
   // Clear prefetch cache when filters change
   useEffect(() => {
     prefetchCache.clear();
-  }, [collection, selectedTag.slug, selectedTag.type, selectedAuthor]);
+  }, [collection, selectedFilters, selectedAuthor]);
 
   // Reset and fetch when filters change
   useEffect(() => {
@@ -472,25 +501,17 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     fetchTemplates(1, true);
   }, [fetchTemplates]);
 
-  // Setup infinite scroll with early trigger (100% viewport from bottom)
-  // Use the inView state to track when trigger element is visible
+  // Infinite scroll
   const { ref: loadMoreRef, inView } = useInView({
-    rootMargin: '100% 0px', // Trigger when within 100% of viewport height from bottom (loads early)
+    rootMargin: '100% 0px',
     threshold: 0,
   });
 
-  // Effect-based infinite scroll that re-checks after loading completes
-  // This handles the case where the trigger element stays in view after loading
   useEffect(() => {
-    // Only proceed if we have templates and more to load
     if (templates.length === 0 || !hasMoreRef.current) return;
-
-    // Skip if any loading is in progress
     if (loading || loadingMore) return;
 
-    // Only trigger if we're in view and not currently loading
     if (inView && !loadingRef.current) {
-      // Small delay to batch rapid state changes and allow DOM to settle
       const timer = setTimeout(() => {
         if (!loadingRef.current && hasMoreRef.current) {
           fetchTemplates(pageRef.current, false);
@@ -500,35 +521,56 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
     }
   }, [inView, loading, loadingMore, templates.length, fetchTemplates]);
 
-  // Handle author click - filter by author
-  const handleAuthorClick = (authorId: string, authorName: string) => {
+  // Filter handlers
+  const addFilter = (name: string, type: 'primary' | 'subcategory') => {
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
+    // Check if already selected
+    if (selectedFilters.some(f => f.name === name && f.type === type)) {
+      return;
+    }
+
     setCollection('all');
-    setSelectedTag({ slug: '', type: '' });
-    setSelectedAuthor({ id: authorId, name: authorName });
+    setSelectedAuthor(null);
+    setSelectedFilters(prev => [...prev, { name, slug, type }]);
   };
 
-  // Clear all filters
-  const clearFilters = () => {
+  const removeFilter = (name: string, type: 'primary' | 'subcategory') => {
+    setSelectedFilters(prev => prev.filter(f => !(f.name === name && f.type === type)));
+  };
+
+  const clearAllFilters = () => {
     setCollection('all');
-    setSelectedTag({ slug: '', type: '' });
+    setSelectedFilters([]);
     setSelectedAuthor(null);
   };
 
-  // Get active filter display text
-  const getActiveFilterText = () => {
-    if (selectedAuthor) {
-      return `Templates by ${selectedAuthor.name}`;
-    }
-    if (collection === 'ultra') {
-      return 'Ultra Featured';
-    }
-    if (selectedTag.slug) {
-      return allTags.find(t => t.slug === selectedTag.slug)?.display_name || selectedTag.slug;
-    }
-    return null;
+  const handleAuthorClick = (authorId: string, authorName: string) => {
+    setCollection('all');
+    setSelectedFilters([]);
+    setSelectedAuthor({ id: authorId, name: authorName });
   };
 
-  const activeFilter = getActiveFilterText();
+  const handleCategoryClick = (category: string, type: 'primary' | 'subcategory') => {
+    addFilter(category, type);
+  };
+
+  // Filtered categories based on search
+  const filteredPrimaryCategories = primaryCategories.filter(cat =>
+    !categorySearch || cat.display_name.toLowerCase().includes(categorySearch.toLowerCase())
+  );
+
+  const filteredWebflowSubcategories = webflowSubcategories.filter(cat =>
+    !categorySearch || cat.display_name.toLowerCase().includes(categorySearch.toLowerCase())
+  );
+
+  // Combined search results for unified search dropdown
+  const searchResults = categorySearch ? [
+    ...filteredPrimaryCategories.slice(0, 5).map(c => ({ ...c, type: 'primary' as const })),
+    ...filteredWebflowSubcategories.slice(0, 5).map(c => ({ ...c, type: 'subcategory' as const }))
+  ] : [];
+
+  const hasActiveFilters = selectedFilters.length > 0 || selectedAuthor !== null;
 
   return (
     <div className="min-h-screen bg-neutral-50">
@@ -544,26 +586,52 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
         </div>
       </header>
 
-      {/* Main Layout with Sidebar */}
+      {/* Main Layout */}
       <div className="flex w-full">
-        {/* Sidebar - Independently Scrollable */}
+        {/* Sidebar */}
         <aside className="hidden lg:block w-72 xl:w-80 border-r border-neutral-200 bg-white sticky top-0 h-screen">
           <ScrollArea className="h-full">
             <div className="p-6 space-y-6">
-              {/* Search */}
+              {/* Unified Search */}
               <div className="space-y-2">
                 <label className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                  Search Tags
+                  Search Categories
                 </label>
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-neutral-400" />
                   <Input
-                    placeholder="Search..."
-                    value={tagSearch}
-                    onChange={(e) => setTagSearch(e.target.value)}
+                    placeholder="Search categories..."
+                    value={categorySearch}
+                    onChange={(e) => setCategorySearch(e.target.value)}
                     className="pl-10 rounded-none border-neutral-300 focus:border-neutral-900 focus:ring-0 h-10"
                   />
                 </div>
+
+                {/* Search Results Dropdown */}
+                {categorySearch && searchResults.length > 0 && (
+                  <div className="absolute z-50 w-[calc(100%-3rem)] mt-1 bg-white border border-neutral-200 shadow-lg max-h-64 overflow-y-auto">
+                    {searchResults.map((result) => (
+                      <button
+                        key={`${result.type}-${result.slug}`}
+                        onClick={() => {
+                          addFilter(result.name, result.type);
+                          setCategorySearch('');
+                        }}
+                        className="w-full text-left px-4 py-2.5 text-sm hover:bg-neutral-100 flex items-center justify-between"
+                      >
+                        <span className="flex items-center gap-2">
+                          {result.type === 'primary' && (
+                            <Star className="h-3.5 w-3.5 fill-amber-500 text-amber-500" />
+                          )}
+                          {result.display_name}
+                        </span>
+                        <span className="text-xs text-neutral-400">
+                          {result.template_count}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Collection Filters */}
@@ -575,11 +643,11 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                   <button
                     onClick={() => {
                       setCollection('ultra');
-                      setSelectedTag({ slug: '', type: '' });
+                      setSelectedFilters([]);
                       setSelectedAuthor(null);
                     }}
                     className={`w-full text-left px-4 py-3 text-sm transition-colors flex items-center justify-between ${
-                      collection === 'ultra' && !selectedAuthor
+                      collection === 'ultra' && !hasActiveFilters
                         ? 'bg-neutral-900 text-white'
                         : 'hover:bg-neutral-100 text-neutral-700'
                     }`}
@@ -592,11 +660,11 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                   <button
                     onClick={() => {
                       setCollection('all');
-                      setSelectedTag({ slug: '', type: '' });
+                      setSelectedFilters([]);
                       setSelectedAuthor(null);
                     }}
                     className={`w-full text-left px-4 py-3 text-sm transition-colors ${
-                      collection === 'all' && !selectedTag.slug && !selectedAuthor
+                      collection === 'all' && !hasActiveFilters
                         ? 'bg-neutral-900 text-white'
                         : 'hover:bg-neutral-100 text-neutral-700'
                     }`}
@@ -606,66 +674,86 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
                 </div>
               </div>
 
-              {/* Subcategories */}
+              {/* Primary Categories Section */}
               <div className="space-y-3">
-                <h3 className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                  Categories
-                </h3>
-                <div className="space-y-1">
-                  {subcategories
-                    .filter(cat => !tagSearch || cat.display_name.toLowerCase().includes(tagSearch.toLowerCase()))
-                    .map((cat) => (
-                      <button
-                        key={cat.id}
-                        onClick={() => {
-                          setCollection('all');
-                          setSelectedTag({ slug: cat.slug, type: 'subcategory' });
-                          setSelectedAuthor(null);
-                        }}
-                        className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
-                          selectedTag.slug === cat.slug && selectedTag.type === 'subcategory' && !selectedAuthor
-                            ? 'bg-neutral-900 text-white'
-                            : 'hover:bg-neutral-100 text-neutral-700'
-                        }`}
-                      >
-                        <span>{cat.display_name}</span>
-                        <span className="text-xs text-neutral-400">
-                          {cat.template_count}
-                        </span>
-                      </button>
-                    ))}
-                </div>
+                <button
+                  onClick={() => setExpandedSections(prev => ({ ...prev, primary: !prev.primary }))}
+                  className="w-full flex items-center justify-between text-xs font-medium text-neutral-500 uppercase tracking-wider"
+                >
+                  <span className="flex items-center gap-2">
+                    <Star className="h-3.5 w-3.5 fill-amber-500 text-amber-500" />
+                    Primary Categories
+                  </span>
+                  {expandedSections.primary ? (
+                    <ChevronUp className="h-4 w-4" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4" />
+                  )}
+                </button>
+                {expandedSections.primary && (
+                  <div className="space-y-1 max-h-64 overflow-y-auto">
+                    {filteredPrimaryCategories.map((cat) => {
+                      const isSelected = selectedFilters.some(f => f.name === cat.name && f.type === 'primary');
+                      return (
+                        <button
+                          key={cat.slug}
+                          onClick={() => isSelected ? removeFilter(cat.name, 'primary') : addFilter(cat.name, 'primary')}
+                          className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
+                            isSelected
+                              ? 'bg-amber-100 text-amber-900 border-l-2 border-amber-500'
+                              : 'hover:bg-neutral-100 text-neutral-700'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2">
+                            <Star className={`h-3 w-3 ${isSelected ? 'fill-amber-500 text-amber-500' : 'text-neutral-300'}`} />
+                            {cat.display_name}
+                          </span>
+                          <span className="text-xs text-neutral-400">
+                            {cat.template_count}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
-              {/* Styles */}
+              {/* Subcategories Section */}
               <div className="space-y-3">
-                <h3 className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                  Styles
-                </h3>
-                <div className="space-y-1">
-                  {styles
-                    .filter(style => !tagSearch || style.display_name.toLowerCase().includes(tagSearch.toLowerCase()))
-                    .map((style) => (
-                      <button
-                        key={style.id}
-                        onClick={() => {
-                          setCollection('all');
-                          setSelectedTag({ slug: style.slug, type: 'style' });
-                          setSelectedAuthor(null);
-                        }}
-                        className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
-                          selectedTag.slug === style.slug && selectedTag.type === 'style' && !selectedAuthor
-                            ? 'bg-neutral-900 text-white'
-                            : 'hover:bg-neutral-100 text-neutral-700'
-                        }`}
-                      >
-                        <span>{style.display_name}</span>
-                        <span className="text-xs text-neutral-400">
-                          {style.template_count}
-                        </span>
-                      </button>
-                    ))}
-                </div>
+                <button
+                  onClick={() => setExpandedSections(prev => ({ ...prev, subcategory: !prev.subcategory }))}
+                  className="w-full flex items-center justify-between text-xs font-medium text-neutral-500 uppercase tracking-wider"
+                >
+                  Subcategories
+                  {expandedSections.subcategory ? (
+                    <ChevronUp className="h-4 w-4" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4" />
+                  )}
+                </button>
+                {expandedSections.subcategory && (
+                  <div className="space-y-1 max-h-64 overflow-y-auto">
+                    {filteredWebflowSubcategories.map((cat) => {
+                      const isSelected = selectedFilters.some(f => f.name === cat.name && f.type === 'subcategory');
+                      return (
+                        <button
+                          key={cat.slug}
+                          onClick={() => isSelected ? removeFilter(cat.name, 'subcategory') : addFilter(cat.name, 'subcategory')}
+                          className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between ${
+                            isSelected
+                              ? 'bg-neutral-200 text-neutral-900 border-l-2 border-neutral-900'
+                              : 'hover:bg-neutral-100 text-neutral-700'
+                          }`}
+                        >
+                          <span>{cat.display_name}</span>
+                          <span className="text-xs text-neutral-400">
+                            {cat.template_count}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           </ScrollArea>
@@ -678,10 +766,10 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
             <div className="flex items-center gap-3 overflow-x-auto pb-2 scrollbar-hide">
               <Button
                 size="sm"
-                variant={collection === 'ultra' && !selectedAuthor ? 'default' : 'outline'}
+                variant={collection === 'ultra' && !hasActiveFilters ? 'default' : 'outline'}
                 onClick={() => {
                   setCollection('ultra');
-                  setSelectedTag({ slug: '', type: '' });
+                  setSelectedFilters([]);
                   setSelectedAuthor(null);
                 }}
                 className="rounded-none shrink-0"
@@ -691,54 +779,101 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
               </Button>
               <Button
                 size="sm"
-                variant={collection === 'all' && !selectedTag.slug && !selectedAuthor ? 'default' : 'outline'}
+                variant={collection === 'all' && !hasActiveFilters ? 'default' : 'outline'}
                 onClick={() => {
                   setCollection('all');
-                  setSelectedTag({ slug: '', type: '' });
+                  setSelectedFilters([]);
                   setSelectedAuthor(null);
                 }}
                 className="rounded-none shrink-0"
               >
                 All
               </Button>
-              {subcategories.slice(0, 5).map((cat) => (
+              {primaryCategories.slice(0, 3).map((cat) => (
                 <Button
-                  key={cat.id}
+                  key={cat.slug}
                   size="sm"
-                  variant={selectedTag.slug === cat.slug && !selectedAuthor ? 'default' : 'outline'}
+                  variant={selectedFilters.some(f => f.name === cat.name) ? 'default' : 'outline'}
                   onClick={() => {
-                    setCollection('all');
-                    setSelectedTag({ slug: cat.slug, type: 'subcategory' });
-                    setSelectedAuthor(null);
+                    const isSelected = selectedFilters.some(f => f.name === cat.name);
+                    if (isSelected) {
+                      removeFilter(cat.name, 'primary');
+                    } else {
+                      addFilter(cat.name, 'primary');
+                    }
                   }}
                   className="rounded-none shrink-0"
                 >
+                  <Star className="h-3 w-3 mr-1 fill-current" />
                   {cat.display_name}
                 </Button>
               ))}
             </div>
           </div>
 
-          {/* Active Filter Display */}
-          {activeFilter && (
+          {/* Active Filters Display */}
+          {(hasActiveFilters || collection === 'ultra') && (
             <div className="px-6 lg:px-12 py-4 bg-white border-b border-neutral-200">
-              <div className="flex items-center gap-3">
-                <span className="text-sm text-neutral-500">Viewing:</span>
-                <Badge
-                  variant="secondary"
-                  className="rounded-none bg-neutral-900 text-white hover:bg-neutral-800 cursor-pointer px-3 py-1 flex items-center gap-2"
-                  onClick={clearFilters}
-                >
-                  {selectedAuthor && <User className="h-3 w-3" />}
-                  {activeFilter}
-                  <X className="h-3 w-3 ml-1" />
-                </Badge>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm text-neutral-500 mr-2">Active Filters:</span>
+
+                {collection === 'ultra' && !hasActiveFilters && (
+                  <Badge
+                    variant="secondary"
+                    className="rounded-none bg-neutral-900 text-white hover:bg-neutral-800 cursor-pointer px-3 py-1 flex items-center gap-2"
+                    onClick={() => setCollection('all')}
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    Ultra Featured
+                    <X className="h-3 w-3 ml-1" />
+                  </Badge>
+                )}
+
+                {selectedAuthor && (
+                  <Badge
+                    variant="secondary"
+                    className="rounded-none bg-neutral-900 text-white hover:bg-neutral-800 cursor-pointer px-3 py-1 flex items-center gap-2"
+                    onClick={() => setSelectedAuthor(null)}
+                  >
+                    <User className="h-3 w-3" />
+                    {selectedAuthor.name}
+                    <X className="h-3 w-3 ml-1" />
+                  </Badge>
+                )}
+
+                {selectedFilters.map((filter) => (
+                  <Badge
+                    key={`${filter.type}-${filter.name}`}
+                    variant="secondary"
+                    className={`rounded-none cursor-pointer px-3 py-1 flex items-center gap-2 ${
+                      filter.type === 'primary'
+                        ? 'bg-amber-100 text-amber-900 hover:bg-amber-200'
+                        : 'bg-neutral-200 text-neutral-900 hover:bg-neutral-300'
+                    }`}
+                    onClick={() => removeFilter(filter.name, filter.type)}
+                  >
+                    {filter.type === 'primary' && (
+                      <Star className="h-3 w-3 fill-amber-500 text-amber-500" />
+                    )}
+                    {filter.name}
+                    <X className="h-3 w-3 ml-1" />
+                  </Badge>
+                ))}
+
+                {(selectedFilters.length > 1 || (selectedFilters.length > 0 && selectedAuthor)) && (
+                  <button
+                    onClick={clearAllFilters}
+                    className="text-xs text-neutral-500 hover:text-neutral-700 underline ml-2"
+                  >
+                    Clear all
+                  </button>
+                )}
               </div>
             </div>
           )}
 
           {/* Collection Info Banner */}
-          {collection === 'ultra' && !selectedAuthor && (
+          {collection === 'ultra' && !hasActiveFilters && (
             <div className="px-6 lg:px-12 py-3 bg-neutral-100 border-b border-neutral-200">
               <p className="text-sm text-neutral-600 flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-neutral-500" />
@@ -747,117 +882,73 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
             </div>
           )}
 
-          {/* Author Filter Info Banner */}
-          {selectedAuthor && (
-            <div className="px-6 lg:px-12 py-3 bg-neutral-100 border-b border-neutral-200">
-              <p className="text-sm text-neutral-600 flex items-center gap-2">
-                <User className="h-4 w-4 text-neutral-500" />
-                Showing all templates created by <span className="font-medium">{selectedAuthor.name}</span>
-              </p>
-            </div>
-          )}
-
           {/* Template Grid */}
-          <div className="px-6 lg:px-12 py-8">
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
-              {templates.map((template, index) => (
-                <TemplateCard
-                  key={template.id}
-                  template={template}
-                  onPreview={setPreviewTemplate}
-                  onAuthorClick={handleAuthorClick}
-                  index={index}
-                />
-              ))}
-            </div>
-
-            {/* Initial Loading */}
-            {loading && templates.length === 0 && (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8 mt-8">
-                {[...Array(6)].map((_, i) => (
-                  <div key={i} className="border border-neutral-200 bg-white">
-                    <Skeleton className="aspect-[16/10] rounded-none" />
-                    <div className="p-5 space-y-4">
-                      <Skeleton className="h-6 w-3/4 rounded-none" />
-                      <Skeleton className="h-4 w-1/2 rounded-none" />
-                      <Skeleton className="h-4 w-1/3 rounded-none" />
-                      <Skeleton className="h-10 w-full rounded-none mt-4" />
-                    </div>
+          <div className="p-6 lg:p-12">
+            {loading ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="space-y-4">
+                    <Skeleton className="aspect-[16/10] w-full rounded-none" />
+                    <Skeleton className="h-6 w-3/4 rounded-none" />
+                    <Skeleton className="h-4 w-1/2 rounded-none" />
                   </div>
+                ))}
+              </div>
+            ) : templates.length === 0 ? (
+              <div className="text-center py-20">
+                <p className="text-neutral-500 text-lg">No templates found matching your filters.</p>
+                <Button
+                  variant="outline"
+                  className="mt-4 rounded-none"
+                  onClick={clearAllFilters}
+                >
+                  Clear Filters
+                </Button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
+                {templates.map((template, index) => (
+                  <TemplateCard
+                    key={template.id}
+                    template={template}
+                    onPreview={setPreviewTemplate}
+                    onAuthorClick={handleAuthorClick}
+                    onCategoryClick={handleCategoryClick}
+                    index={index}
+                  />
                 ))}
               </div>
             )}
 
-            {/* Load More Loading Skeletons */}
-            {loadingMore && (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8 mt-8">
-                {[...Array(3)].map((_, i) => (
-                  <div key={i} className="border border-neutral-200 bg-white">
-                    <Skeleton className="aspect-[16/10] rounded-none" />
-                    <div className="p-5 space-y-4">
-                      <Skeleton className="h-6 w-3/4 rounded-none" />
-                      <Skeleton className="h-4 w-1/2 rounded-none" />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Infinite Scroll Trigger - Always rendered for reliable observation */}
+            {/* Infinite Scroll Trigger */}
             {templates.length > 0 && (
               <div
                 ref={loadMoreRef}
-                className="py-8"
-                aria-hidden="true"
+                className="mt-12 flex flex-col items-center justify-center py-8"
               >
-                {/* Show loading indicator when fetching more */}
-                {loadingMore && (
-                  <div className="text-neutral-500 text-center">
-                    <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
-                    <span className="text-sm tracking-wide">Loading more templates...</span>
+                {loadingMore ? (
+                  <div className="flex items-center gap-3 text-neutral-500">
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    <span className="text-sm">Loading more templates...</span>
                   </div>
-                )}
-
-                {/* Show subtle indicator when more pages available but not loading */}
-                {pageInfo.hasNext && !loadingMore && !loading && (
-                  <div className="flex flex-col items-center gap-3">
-                    <div className="text-neutral-400 text-xs tracking-wide">
-                      Scroll for more
+                ) : pageInfo.hasNext ? (
+                  <div className="text-center space-y-3">
+                    <div className="flex items-center gap-2 text-neutral-400 text-sm">
+                      <span>Scroll for more</span>
                     </div>
-                    {/* Manual load button as fallback */}
                     <Button
-                      variant="ghost"
-                      size="sm"
+                      variant="outline"
+                      className="rounded-none"
                       onClick={() => fetchTemplates(pageRef.current, false)}
-                      className="text-neutral-500 hover:text-neutral-700"
                     >
                       Load More
                     </Button>
                   </div>
+                ) : (
+                  <p className="text-neutral-400 text-sm">
+                    Showing all {templates.length} templates
+                  </p>
                 )}
-
-                {/* End of results message */}
-                {!pageInfo.hasNext && !loadingMore && (
-                  <div className="text-center py-4 border-t border-neutral-200">
-                    <p className="text-neutral-500 text-sm tracking-wide">
-                      Showing all {templates.length} templates
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* No Results */}
-            {!loading && templates.length === 0 && (
-              <div className="text-center py-20">
-                <p className="text-neutral-500 text-lg">No templates found for the selected filters</p>
-                <Button
-                  variant="outline"
-                  className="mt-4 rounded-none"
-                  onClick={clearFilters}
-                >
-                  View All Templates
-                </Button>
               </div>
             )}
           </div>
@@ -871,10 +962,10 @@ export default function TemplateGallery({ onTemplateSelect }: TemplateGalleryPro
         onClose={() => setPreviewTemplate(null)}
         primaryAction={{
           label: 'Select Template',
-          onClick: async (template, currentUrl) => {
+          onClick: (template) => {
             onTemplateSelect(template);
-            void currentUrl;
-          }
+            setPreviewTemplate(null);
+          },
         }}
       />
     </div>
