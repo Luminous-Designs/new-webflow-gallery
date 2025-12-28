@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
+import { useAuth } from '@/components/auth/auth-context';
 import type { Template } from '@/types/template';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -44,6 +45,7 @@ export function AdminTemplateToolsDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { session } = useAuth();
   const [settings, setSettings] = useState<ScreenshotSettings>(DEFAULT_SCREENSHOT_SETTINGS);
 
   const [selector, setSelector] = useState('');
@@ -79,7 +81,9 @@ export function AdminTemplateToolsDialog({
   useEffect(() => {
     if (!open || !template?.id) return;
     setTemplateFeatured((s) => ({ ...s, loading: true }));
-    fetch(`/api/admin/gallery-featured-template?templateId=${template.id}`)
+    const token = session?.access_token;
+    const headers: HeadersInit | undefined = token ? { Authorization: `Bearer ${token}` } : undefined;
+    fetch(`/api/admin/gallery-featured-template?templateId=${template.id}`, { headers, credentials: 'same-origin' })
       .then((r) => r.json())
       .then((data) => {
         setTemplateFeatured({
@@ -89,7 +93,7 @@ export function AdminTemplateToolsDialog({
         });
       })
       .catch(() => setTemplateFeatured((s) => ({ ...s, loading: false })));
-  }, [open, template?.id]);
+  }, [open, session?.access_token, template?.id]);
 
   useEffect(() => {
     if (!open) return;
@@ -102,9 +106,15 @@ export function AdminTemplateToolsDialog({
   const enqueue = async (type: string, extra: Record<string, unknown>) => {
     if (!template) return;
     try {
+      const token = session?.access_token;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      console.log('[AdminTools] enqueue', { type, templateId: template.id });
       const res = await fetch('/api/admin/gallery-jobs', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
+        credentials: 'same-origin',
         body: JSON.stringify({
           type,
           templateId: template.id,
@@ -114,12 +124,14 @@ export function AdminTemplateToolsDialog({
       });
       const data = await res.json();
       if (!res.ok) {
+        console.error('[AdminTools] enqueue failed', { status: res.status, data });
         throw new Error(data?.error || 'Failed to enqueue job');
       }
       toast.success('Added to queue');
       return data?.job;
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to enqueue job';
+      console.error('[AdminTools] enqueue error', e);
       toast.error(msg);
       return null;
     }
@@ -134,9 +146,13 @@ export function AdminTemplateToolsDialog({
     }
     setSelectorValidation({ state: 'validating' });
     try {
+      const token = session?.access_token;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch('/api/admin/gallery-selector-validate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
+        credentials: 'same-origin',
         body: JSON.stringify({ templateId: template.id, selector: raw }),
       });
       const data = await res.json();
@@ -161,7 +177,9 @@ export function AdminTemplateToolsDialog({
     if (!template) return;
     setHomepageLoading(true);
     try {
-      const res = await fetch(`/api/admin/gallery-homepage-links?templateId=${template.id}`);
+      const token = session?.access_token;
+      const headers: HeadersInit | undefined = token ? { Authorization: `Bearer ${token}` } : undefined;
+      const res = await fetch(`/api/admin/gallery-homepage-links?templateId=${template.id}`, { headers, credentials: 'same-origin' });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || 'Failed to load links');
       const links = Array.isArray(data?.links) ? data.links : [];
@@ -184,9 +202,13 @@ export function AdminTemplateToolsDialog({
     if (!template) return;
     setTemplateFeatured((s) => ({ ...s, loading: true }));
     try {
+      const token = session?.access_token;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch('/api/admin/gallery-featured-template', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
+        credentials: 'same-origin',
         body: JSON.stringify({ templateId: template.id }),
       });
       const data = await res.json();
@@ -207,9 +229,13 @@ export function AdminTemplateToolsDialog({
   const toggleAuthorFeatured = async () => {
     if (!template?.author_id) return;
     try {
+      const token = session?.access_token;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch('/api/admin/gallery-featured-author', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
+        credentials: 'same-origin',
         body: JSON.stringify({
           authorId: template.author_id,
           authorName: template.author_name || '',

@@ -23,7 +23,7 @@ async function getExisting(templateId: number): Promise<{ position: number } | n
 }
 
 export async function GET(request: NextRequest) {
-  const admin = await requireAdminUser();
+  const admin = await requireAdminUser(request);
   if (!admin.ok) return json({ error: admin.error }, admin.status);
 
   const { searchParams } = new URL(request.url);
@@ -35,7 +35,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const admin = await requireAdminUser();
+  const admin = await requireAdminUser(request);
   if (!admin.ok) return json({ error: admin.error }, admin.status);
 
   let body: unknown;

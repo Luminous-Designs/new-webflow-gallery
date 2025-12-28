@@ -123,3 +123,5 @@ All via admin dashboard at `/admin`:
 3. **Service role key required** - Admin/scraper operations need `SUPABASE_SERVICE_ROLE_KEY`.
 
 4. **No local filesystem for screenshots** - All screenshots go directly to R2.
+
+5. **Cloudflare edge caching for read-only APIs** - `templates.luminardigital.com` uses Cloudflare Cache Rules to cache read-only endpoints like `/api/templates` and filter endpoints, while bypassing `/api/proxy` and `/api/admin`. See `docs/caching-setup.md` for the exact rules and verification steps.

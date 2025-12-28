@@ -179,7 +179,9 @@ async function runJob(job: AdminGalleryJob): Promise<void> {
     requiredSelectors: job.type === 'retake_author_remove_selector' && job.selector ? [job.selector] : [],
   };
 
-  const urls = job.items.map((i) => i.storefrontUrl);
+  // In screenshots_only mode, the scraper only needs the slug to look up the live preview URL
+  // in Supabase. Using slugs here avoids failures when `storefront_url` is missing or malformed.
+  const urls = job.items.map((i) => i.slug);
 
   const scraper = new FreshScraper(jobConfig);
   await scraper.init(false);
@@ -189,7 +191,7 @@ async function runJob(job: AdminGalleryJob): Promise<void> {
   });
 
   scraper.on('template-phase', (data) => {
-    const item = job.items.find((i) => i.storefrontUrl === data.url);
+    const item = job.items.find((i) => i.slug === data.url);
     if (!item) return;
     if (data.phase === 'taking_screenshot' || data.phase === 'processing_screenshot') {
       item.status = 'running';
@@ -203,7 +205,7 @@ async function runJob(job: AdminGalleryJob): Promise<void> {
   });
 
   scraper.on('template-complete', (data) => {
-    const item = job.items.find((i) => i.storefrontUrl === data.url);
+    const item = job.items.find((i) => i.slug === data.slug);
     if (!item) return;
     if (data.success) {
       // If screenshotPath is missing, this might be a "skipped" template (e.g., required selector missing).
@@ -259,4 +261,3 @@ async function processQueue(): Promise<void> {
     isProcessing = false;
   }
 }
-

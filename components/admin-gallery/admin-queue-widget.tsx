@@ -19,7 +19,7 @@ export function AdminQueueWidget({
 }: {
   onTemplateScreenshotUpdated?: (templateId: number, screenshotPath: string) => void;
 }) {
-  const { isAdmin } = useAuth();
+  const { isAdmin, session } = useAuth();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const completedToastIdsRef = useRef<Set<string>>(new Set());
   const seenScreenshotRef = useRef<Map<number, string>>(new Map());
@@ -30,7 +30,14 @@ export function AdminQueueWidget({
 
     const poll = async () => {
       try {
-        const res = await fetch('/api/admin/gallery-jobs', { cache: 'no-store' });
+        const token = session?.access_token;
+        const headers: HeadersInit | undefined = token ? { Authorization: `Bearer ${token}` } : undefined;
+        const res = await fetch('/api/admin/gallery-jobs', { cache: 'no-store', headers, credentials: 'same-origin' });
+        if (res.status === 401) {
+          // If admin UI thinks you're logged in but API disagrees, surface it.
+          console.warn('[AdminQueue] Unauthorized (401) polling /api/admin/gallery-jobs');
+          return;
+        }
         const data = (await res.json()) as Snapshot;
         if (!cancelled) setSnapshot(data);
       } catch {
@@ -44,7 +51,7 @@ export function AdminQueueWidget({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [isAdmin]);
+  }, [isAdmin, session?.access_token]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -83,7 +90,10 @@ export function AdminQueueWidget({
       } else if (job.status === 'succeeded') {
         toast.success(`Queue job completed: ${succeeded} succeeded${skipped ? `, ${skipped} skipped` : ''}${failed ? `, ${failed} failed` : ''}`);
       } else {
-        toast.error(`Queue job failed: ${failed} failed${succeeded ? `, ${succeeded} succeeded` : ''}${skipped ? `, ${skipped} skipped` : ''}`);
+        const detail = job.lastError || items.find((i) => i.status === 'failed')?.error || '';
+        toast.error(
+          `Queue job failed: ${failed} failed${succeeded ? `, ${succeeded} succeeded` : ''}${skipped ? `, ${skipped} skipped` : ''}${detail ? ` — ${detail}` : ''}`
+        );
       }
     }
   }, [snapshot]);

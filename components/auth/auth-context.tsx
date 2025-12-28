@@ -22,6 +22,16 @@ function authDebug(...args: unknown[]) {
   console.log(...args)
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+  })
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeoutId) clearTimeout(timeoutId)
+  }) as Promise<T>
+}
+
 interface AuthContextType {
   // Auth state
   user: User | null
@@ -189,7 +199,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authDebug('[Auth] initAuth:start')
       try {
         // 1) Fast, local check (does not require network) to avoid blocking UI.
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+        const { data: { session }, error: sessionError } = await withTimeout(
+          supabase.auth.getSession(),
+          1500,
+          'supabase.auth.getSession()'
+        )
         authDebug('[Auth] getSession', { hasSession: Boolean(session), error: sessionError?.message })
 
         if (!mounted) return
@@ -212,7 +226,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // 2) Background validation (network) to catch stale/invalid sessions.
         void (async () => {
           try {
-            const { data: { user: verifiedUser }, error: userError } = await supabase.auth.getUser()
+            const { data: { user: verifiedUser }, error: userError } = await withTimeout(
+              supabase.auth.getUser(),
+              12_000,
+              'supabase.auth.getUser()'
+            )
             authDebug('[Auth] getUser', { userId: verifiedUser?.id, error: userError?.message })
 
             if (!mounted) return
@@ -246,7 +264,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             if (nextUserId && prevUserId !== nextUserId) loadUserData(nextUserId)
           } catch (error) {
             // Network/timeout errors: keep current state.
-            console.error('[Auth] getUser threw (keeping current state):', error)
+            console.error('[Auth] getUser failed (keeping current state):', error)
           }
         })()
       } catch (error) {

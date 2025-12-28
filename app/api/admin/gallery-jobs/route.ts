@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
+import fs from 'node:fs';
+import { chromium } from 'playwright';
 import { supabaseAdmin } from '@/lib/supabase';
 import { requireAdminUser } from '@/lib/admin/auth';
 import { enqueueAdminGalleryJob, getAdminGalleryJobsSnapshot, type AdminGalleryJobType } from '@/lib/admin/gallery-jobs';
 import { clampFreshScraperConfig, type FreshScraperConfig } from '@/lib/scraper/fresh-scraper';
+import { isR2Configured } from '@/lib/r2';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -46,15 +49,35 @@ function isJobType(value: unknown): value is AdminGalleryJobType {
   );
 }
 
-export async function GET() {
-  const admin = await requireAdminUser();
+export async function GET(request: NextRequest) {
+  const admin = await requireAdminUser(request);
   if (!admin.ok) return json({ error: admin.error }, admin.status);
   return json(getAdminGalleryJobsSnapshot());
 }
 
 export async function POST(request: NextRequest) {
-  const admin = await requireAdminUser();
+  const admin = await requireAdminUser(request);
   if (!admin.ok) return json({ error: admin.error }, admin.status);
+
+  // Preflight: queue jobs require Playwright + R2 write access.
+  if (!isR2Configured()) {
+    console.error('[AdminJobs] R2 is not configured; cannot enqueue screenshot jobs.');
+    return json({
+      error: 'R2 is not configured on the server. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, and R2_PUBLIC_URL in Coolify env vars.',
+    }, 500);
+  }
+  try {
+    const executablePath = chromium.executablePath();
+    if (executablePath && !fs.existsSync(executablePath)) {
+      console.error('[AdminJobs] Playwright Chromium missing at:', executablePath);
+      return json({
+        error: 'Playwright Chromium is not installed in this deployment. Add a Coolify build step: `npx playwright install --with-deps chromium`.',
+      }, 500);
+    }
+  } catch (e) {
+    console.error('[AdminJobs] Playwright preflight failed:', e);
+    return json({ error: 'Playwright is not available in this deployment.' }, 500);
+  }
 
   let body: unknown;
   try {
@@ -128,7 +151,7 @@ export async function POST(request: NextRequest) {
     templateId: template.id as number,
     slug: template.slug as string,
     name: (template.name as string | null) || null,
-    storefrontUrl: template.storefront_url as string,
+    storefrontUrl: (template.storefront_url as string | null) || '',
   };
 
   let items: typeof baseItem[] = [baseItem];
@@ -150,7 +173,7 @@ export async function POST(request: NextRequest) {
       templateId: t.id as number,
       slug: t.slug as string,
       name: (t.name as string | null) || null,
-      storefrontUrl: t.storefront_url as string,
+      storefrontUrl: (t.storefront_url as string | null) || '',
     }));
   }
 

@@ -15,7 +15,7 @@ function json(body: unknown, init?: number | ResponseInit) {
 type LinkCandidate = { href: string; text: string };
 
 export async function GET(request: NextRequest) {
-  const admin = await requireAdminUser();
+  const admin = await requireAdminUser(request);
   if (!admin.ok) return json({ error: admin.error }, admin.status);
 
   const { searchParams } = new URL(request.url);
@@ -89,4 +89,3 @@ export async function GET(request: NextRequest) {
     await browser.close();
   }
 }
-

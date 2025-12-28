@@ -23,7 +23,7 @@ async function getExisting(authorId: string): Promise<{ is_active: boolean } | n
 }
 
 export async function POST(request: NextRequest) {
-  const admin = await requireAdminUser();
+  const admin = await requireAdminUser(request);
   if (!admin.ok) return json({ error: admin.error }, admin.status);
 
   let body: unknown;
