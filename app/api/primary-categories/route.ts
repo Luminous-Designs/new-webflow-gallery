@@ -39,6 +39,7 @@ export async function GET() {
     return NextResponse.json(categories, {
       headers: {
         'Cache-Control': 'public, max-age=0, s-maxage=300, stale-while-revalidate=3600',
+        'CDN-Cache-Control': 'public, max-age=0, s-maxage=300, stale-while-revalidate=3600',
       },
     });
   } catch (error) {

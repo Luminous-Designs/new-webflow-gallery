@@ -1,10 +1,26 @@
 'use client'
 
-import { createContext, useContext, useEffect, useState, useCallback, useMemo, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import type { User, Session } from '@supabase/supabase-js'
 import type { Profile, Collection } from '@/lib/supabase/types'
 import { toast } from 'sonner'
+
+const DEBUG_AUTH_ENV = process.env.NEXT_PUBLIC_DEBUG_AUTH === 'true'
+
+function isAuthDebugEnabled() {
+  if (DEBUG_AUTH_ENV) return true
+  try {
+    return typeof window !== 'undefined' && window.localStorage.getItem('DEBUG_AUTH') === '1'
+  } catch {
+    return false
+  }
+}
+
+function authDebug(...args: unknown[]) {
+  if (!isAuthDebugEnabled()) return
+  console.log(...args)
+}
 
 interface AuthContextType {
   // Auth state
@@ -49,6 +65,8 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [supabase] = useState(() => createClient())
+  const loadSeqRef = useRef(0)
+  const lastUserIdRef = useRef<string | null>(null)
 
   // Auth state
   const [user, setUser] = useState<User | null>(null)
@@ -69,6 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Fetch profile
   const fetchProfile = useCallback(async (userId: string) => {
+    const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now()
     const { data, error } = await supabase
       .from('profiles')
       .select('*')
@@ -79,14 +98,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.error('Error fetching profile:', error)
       return null
     }
+    authDebug('[Auth] fetchProfile', {
+      userId,
+      ok: Boolean(data),
+      durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+    })
     return data as Profile
   }, [supabase])
 
   // Fetch collections
   const fetchCollections = useCallback(async (userId: string) => {
-    console.log('[Auth] fetchCollections called for user:', userId)
     setCollectionsLoading(true)
     try {
+      const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now()
       const { data, error } = await supabase
         .from('collections')
         .select('*')
@@ -94,19 +118,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .order('is_favorites', { ascending: false })
         .order('created_at', { ascending: false })
 
-      console.log('[Auth] fetchCollections result:', { data, error: error?.message })
+      authDebug('[Auth] fetchCollections', {
+        userId,
+        count: data?.length ?? 0,
+        error: error?.message,
+        durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+      })
 
       if (error) {
         console.error('[Auth] Error fetching collections:', error)
         return
       }
 
-      console.log('[Auth] Setting collections:', data?.length, 'collections')
       setCollections(data as Collection[])
 
       // Fetch favorite template IDs
       const favoritesCollection = (data as Collection[]).find(c => c.is_favorites)
-      console.log('[Auth] Favorites collection:', favoritesCollection)
       if (favoritesCollection) {
         const { data: favoriteTemplates } = await supabase
           .from('collection_templates')
@@ -129,92 +156,140 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [user, fetchCollections])
 
+  const loadUserData = useCallback((userId: string) => {
+    const loadSeq = ++loadSeqRef.current
+    authDebug('[Auth] loadUserData:start', { userId, loadSeq })
+
+    void (async () => {
+      try {
+        const [nextProfile] = await Promise.all([
+          fetchProfile(userId),
+          fetchCollections(userId),
+        ])
+
+        if (loadSeqRef.current !== loadSeq) {
+          authDebug('[Auth] loadUserData:stale', { userId, loadSeq })
+          return
+        }
+        setProfile(nextProfile)
+        authDebug('[Auth] loadUserData:done', { userId, loadSeq })
+      } catch (error) {
+        if (loadSeqRef.current !== loadSeq) return
+        console.error('[Auth] Error loading user data:', error)
+      }
+    })()
+  }, [fetchCollections, fetchProfile])
+
   // Initialize auth state
   useEffect(() => {
     let mounted = true
 
     const initAuth = async () => {
-      console.log('[Auth] Starting initAuth...')
+      const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      authDebug('[Auth] initAuth:start')
       try {
-        // Use getUser() for more reliable auth check
-        const { data: { user }, error: userError } = await supabase.auth.getUser()
+        // 1) Fast, local check (does not require network) to avoid blocking UI.
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+        authDebug('[Auth] getSession', { hasSession: Boolean(session), error: sessionError?.message })
 
-        console.log('[Auth] getUser result:', { user: user?.id, error: userError?.message })
+        if (!mounted) return
+        setSession(session)
+        setUser(session?.user ?? null)
+        const prevUserId = lastUserIdRef.current
+        const nextUserId = session?.user?.id ?? null
+        lastUserIdRef.current = nextUserId
+        setIsLoading(false)
 
-        if (userError) {
-          // Expected on first load when no session exists - not an error
-          const isSessionMissing =
-            userError.name === 'AuthSessionMissingError' ||
-            userError.message?.includes('Auth session missing') ||
-            userError.message?.includes('session_not_found');
-
-          if (isSessionMissing) {
-            // This is normal for pages that don't require auth
-            console.log('[Auth] No active session (expected for guest users)')
-          } else {
-            console.error('[Auth] Error getting user:', userError)
-          }
-
-          if (mounted) {
-            setUser(null)
-            setSession(null)
-            setProfile(null)
-            setCollections([])
-            setFavoriteTemplateIds(new Set())
-          }
-          if (mounted) {
-            setIsLoading(false)
-          }
-          return
+        if (nextUserId) {
+          if (prevUserId !== nextUserId) loadUserData(nextUserId)
+        } else {
+          loadSeqRef.current++
+          setProfile(null)
+          setCollections([])
+          setFavoriteTemplateIds(new Set())
         }
 
-        if (mounted) {
-          setUser(user)
-        }
+        // 2) Background validation (network) to catch stale/invalid sessions.
+        void (async () => {
+          try {
+            const { data: { user: verifiedUser }, error: userError } = await supabase.auth.getUser()
+            authDebug('[Auth] getUser', { userId: verifiedUser?.id, error: userError?.message })
 
-        if (user && mounted) {
-          console.log('[Auth] Fetching profile for user:', user.id)
-          const profile = await fetchProfile(user.id)
-          console.log('[Auth] Profile fetched:', profile)
-          if (mounted) {
-            setProfile(profile)
+            if (!mounted) return
+
+            if (userError) {
+              const isSessionMissing =
+                userError.name === 'AuthSessionMissingError' ||
+                userError.message?.includes('Auth session missing') ||
+                userError.message?.includes('session_not_found')
+
+              if (isSessionMissing) {
+                setUser(null)
+                setSession(null)
+                lastUserIdRef.current = null
+                loadSeqRef.current++
+                setProfile(null)
+                setCollections([])
+                setFavoriteTemplateIds(new Set())
+              } else {
+                // Transient/network issues shouldn't force a client-side sign-out.
+                console.error('[Auth] Error validating user session (keeping current state):', userError)
+              }
+              return
+            }
+
+            // Ensure state matches the verified user (e.g. cookie/session drift).
+            setUser(verifiedUser ?? null)
+            const prevUserId = lastUserIdRef.current
+            const nextUserId = verifiedUser?.id ?? null
+            lastUserIdRef.current = nextUserId
+            if (nextUserId && prevUserId !== nextUserId) loadUserData(nextUserId)
+          } catch (error) {
+            // Network/timeout errors: keep current state.
+            console.error('[Auth] getUser threw (keeping current state):', error)
           }
-          console.log('[Auth] Fetching collections...')
-          await fetchCollections(user.id)
-          console.log('[Auth] Collections fetched')
-        }
+        })()
       } catch (error) {
         console.error('[Auth] Error initializing auth:', error)
       } finally {
-        console.log('[Auth] initAuth complete, setting isLoading=false')
-        if (mounted) {
-          setIsLoading(false)
-        }
+        if (mounted) setIsLoading(false)
+        authDebug('[Auth] initAuth:done', {
+          durationMs: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+        })
       }
     }
 
     initAuth()
 
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log('[Auth] onAuthStateChange:', event, session?.user?.id)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (!mounted) return
+
+      authDebug('[Auth] onAuthStateChange', { event, userId: session?.user?.id })
+      const prevUserId = lastUserIdRef.current
+      const nextUserId = session?.user?.id ?? null
+      lastUserIdRef.current = nextUserId
 
       setSession(session)
       setUser(session?.user ?? null)
+      setIsLoading(false)
 
-      if (session?.user) {
-        const profile = await fetchProfile(session.user.id)
-        setProfile(profile)
-        await fetchCollections(session.user.id)
-      } else {
+      const shouldReloadUserData =
+        prevUserId !== nextUserId ||
+        event === 'SIGNED_IN' ||
+        event === 'INITIAL_SESSION' ||
+        event === 'USER_UPDATED'
+
+      if (!nextUserId) {
+        loadSeqRef.current++
         setProfile(null)
         setCollections([])
         setFavoriteTemplateIds(new Set())
+        return
       }
 
-      if (event === 'SIGNED_OUT') {
-        setIsLoading(false)
+      if (shouldReloadUserData) {
+        loadUserData(nextUserId)
       }
     })
 
@@ -222,7 +297,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       mounted = false
       subscription.unsubscribe()
     }
-  }, [supabase, fetchProfile, fetchCollections])
+  }, [supabase, loadUserData])
 
   // Auth actions
   const signIn = useCallback(async (email: string, password: string) => {

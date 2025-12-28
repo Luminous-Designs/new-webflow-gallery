@@ -239,40 +239,45 @@ export function AdminTemplateToolsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>Admin Tools</DialogTitle>
-          <DialogDescription>
+      <DialogContent className="sm:max-w-3xl p-0 gap-0 overflow-hidden">
+        <DialogHeader className="px-6 pt-6 pb-4 border-b border-border/50 bg-muted/30">
+          <DialogTitle className="text-base">Admin Tools</DialogTitle>
+          <DialogDescription asChild>
             {template ? (
-              <span className="inline-flex items-center gap-2">
-                <span className="font-medium text-foreground">{template.name}</span>
-                <Badge variant="secondary">{template.slug}</Badge>
-              </span>
+              <div className="flex items-center gap-2 pt-1">
+                <span className="font-medium text-foreground text-sm">{template.name}</span>
+                <Badge variant="secondary" className="text-xs font-mono">{template.slug}</Badge>
+              </div>
             ) : null}
           </DialogDescription>
         </DialogHeader>
 
         {!template ? null : (
-          <Tabs defaultValue="screenshot" className="mt-4">
-            <TabsList className="w-full">
-              <TabsTrigger value="screenshot">Screenshot</TabsTrigger>
-              <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
-              <TabsTrigger value="homepage">Homepage</TabsTrigger>
-              <TabsTrigger value="featured">Featured</TabsTrigger>
-            </TabsList>
+          <Tabs defaultValue="screenshot" className="flex flex-col">
+            <div className="px-6 pt-4 pb-0">
+              <TabsList className="w-full grid grid-cols-4 h-9">
+                <TabsTrigger value="screenshot" className="text-xs">Screenshot</TabsTrigger>
+                <TabsTrigger value="artifacts" className="text-xs">Artifacts</TabsTrigger>
+                <TabsTrigger value="homepage" className="text-xs">Homepage</TabsTrigger>
+                <TabsTrigger value="featured" className="text-xs">Featured</TabsTrigger>
+              </TabsList>
+            </div>
 
-            <TabsContent value="screenshot" className="mt-4">
+            <TabsContent value="screenshot" className="mt-0 px-6 py-4 flex-1">
               <div className="space-y-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm text-muted-foreground">
-                    Re-takes the screenshot using the existing homepage detection and overwrites the R2 object.
+                <div className="flex items-start justify-between gap-4 p-4 rounded-lg bg-muted/40 border border-border/50">
+                  <div className="space-y-1 flex-1">
+                    <div className="text-sm font-medium">Re-take Screenshot</div>
+                    <div className="text-xs text-muted-foreground leading-relaxed">
+                      Uses existing homepage detection and overwrites the R2 object with new capture.
+                    </div>
                   </div>
-                  <Button onClick={() => enqueue('retake_screenshot', {})}>
-                    Queue Screenshot Re-take
+                  <Button size="sm" onClick={() => enqueue('retake_screenshot', {})}>
+                    Queue Re-take
                   </Button>
                 </div>
 
-                <ScrollArea className="h-[420px] pr-4">
+                <ScrollArea className="h-[380px] pr-3">
                   <ScreenshotSettingsPanel
                     value={settings}
                     onChange={(next) => setSettings((s) => ({ ...s, ...next }))}
@@ -281,10 +286,12 @@ export function AdminTemplateToolsDialog({
               </div>
             </TabsContent>
 
-            <TabsContent value="artifacts" className="mt-4">
+            <TabsContent value="artifacts" className="mt-0 px-6 py-4 flex-1">
               <div className="space-y-4">
-                <div className="space-y-2">
-                  <div className="text-sm font-medium">CSS selector or element ID</div>
+                <div className="space-y-3 p-4 rounded-lg bg-muted/40 border border-border/50">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Element Removal
+                  </div>
                   <div className="flex gap-2">
                     <Input
                       value={selector}
@@ -292,9 +299,16 @@ export function AdminTemplateToolsDialog({
                         setSelector(e.target.value);
                         setSelectorValidation({ state: 'idle' });
                       }}
-                      placeholder="e.g. .cookie-banner, #chat-widget, div[data-testid='banner']"
+                      placeholder="e.g. .cookie-banner, #chat-widget"
+                      className="text-sm h-9"
                     />
-                    <Button variant="outline" onClick={validateSelector} disabled={selectorValidation.state === 'validating'}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={validateSelector}
+                      disabled={selectorValidation.state === 'validating'}
+                      className="shrink-0"
+                    >
                       Validate
                     </Button>
                   </div>
@@ -302,43 +316,47 @@ export function AdminTemplateToolsDialog({
                 </div>
 
                 {canPersistAuthor ? (
-                  <div className="flex items-center justify-between gap-3 rounded-md border p-3">
-                    <div className="space-y-0.5">
+                  <div className="flex items-center justify-between gap-4 p-4 rounded-lg border border-border/50">
+                    <div className="space-y-1">
                       <div className="text-sm font-medium">Persist for author</div>
-                      <div className="text-xs text-muted-foreground">
-                        Save this removal rule for this author so future scrapes automatically remove it before screenshotting.
+                      <div className="text-xs text-muted-foreground leading-relaxed">
+                        Automatically remove this element for all future scrapes from this author.
                       </div>
                     </div>
                     <Switch checked={persistForAuthor} onCheckedChange={setPersistForAuthor} />
                   </div>
                 ) : (
-                  <div className="text-xs text-muted-foreground">
-                    This template has no author id, so the removal rule cannot be persisted for future scrapes.
+                  <div className="text-xs text-muted-foreground px-1">
+                    No author ID — removal rule cannot be persisted.
                   </div>
                 )}
 
                 <div className="flex flex-wrap gap-2">
                   {selectorValidation.state === 'valid' ? (
                     <>
-                      <Button onClick={() => enqueue('retake_screenshot_remove_selector', { selector: selector.trim(), persistToAuthor: persistForAuthor && canPersistAuthor })}>
-                        Re-take This Template (remove)
+                      <Button
+                        size="sm"
+                        onClick={() => enqueue('retake_screenshot_remove_selector', { selector: selector.trim(), persistToAuthor: persistForAuthor && canPersistAuthor })}
+                      >
+                        Re-take This Template
                       </Button>
                       <Button
                         variant="secondary"
+                        size="sm"
                         onClick={() => enqueue('retake_author_remove_selector', { selector: selector.trim(), persistToAuthor: persistForAuthor && canPersistAuthor })}
                         disabled={!template.author_id}
                       >
-                        Re-take All by Author (remove)
+                        Re-take All by Author
                       </Button>
                     </>
                   ) : (
-                    <div className="text-xs text-muted-foreground">
-                      Validate a selector first to enable re-screenshot options.
+                    <div className="text-xs text-muted-foreground px-1">
+                      Validate a selector to enable re-screenshot options.
                     </div>
                   )}
                 </div>
 
-                <ScrollArea className="h-[360px] pr-4">
+                <ScrollArea className="h-[280px] pr-3">
                   <ScreenshotSettingsPanel
                     value={settings}
                     onChange={(next) => setSettings((s) => ({ ...s, ...next }))}
@@ -347,21 +365,26 @@ export function AdminTemplateToolsDialog({
               </div>
             </TabsContent>
 
-            <TabsContent value="homepage" className="mt-4">
+            <TabsContent value="homepage" className="mt-0 px-6 py-4 flex-1">
               <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-muted-foreground">
-                    Choose a homepage URL from internal links (same domain) and re-take the screenshot.
+                <div className="flex items-start justify-between gap-4 p-4 rounded-lg bg-muted/40 border border-border/50">
+                  <div className="space-y-1 flex-1">
+                    <div className="text-sm font-medium">Alternate Homepage</div>
+                    <div className="text-xs text-muted-foreground leading-relaxed">
+                      Select an internal page to use as the homepage for screenshots.
+                    </div>
                   </div>
-                  <Button variant="outline" onClick={loadHomepageLinks} disabled={homepageLoading}>
+                  <Button variant="outline" size="sm" onClick={loadHomepageLinks} disabled={homepageLoading}>
                     {homepageLoading ? 'Loading…' : 'Load Pages'}
                   </Button>
                 </div>
 
                 <div className="space-y-2">
-                  <div className="text-sm font-medium">Homepage selection</div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-1">
+                    Page Selection
+                  </div>
                   <Select value={selectedHomepageUrl} onValueChange={setSelectedHomepageUrl}>
-                    <SelectTrigger>
+                    <SelectTrigger className="h-9">
                       <SelectValue placeholder="Select a page…" />
                     </SelectTrigger>
                     <SelectContent>
@@ -376,6 +399,7 @@ export function AdminTemplateToolsDialog({
 
                 <div className="flex justify-end">
                   <Button
+                    size="sm"
                     onClick={() => enqueue('change_homepage', { homepageUrl: selectedHomepageUrl })}
                     disabled={!selectedHomepageUrl}
                   >
@@ -383,7 +407,7 @@ export function AdminTemplateToolsDialog({
                   </Button>
                 </div>
 
-                <ScrollArea className="h-[320px] pr-4">
+                <ScrollArea className="h-[280px] pr-3">
                   <ScreenshotSettingsPanel
                     value={settings}
                     onChange={(next) => setSettings((s) => ({ ...s, ...next }))}
@@ -392,33 +416,49 @@ export function AdminTemplateToolsDialog({
               </div>
             </TabsContent>
 
-            <TabsContent value="featured" className="mt-4">
+            <TabsContent value="featured" className="mt-0 px-6 py-4 flex-1">
               <div className="space-y-4">
-                <div className="flex items-center justify-between gap-3 rounded-md border p-3">
+                <div className="flex items-center justify-between gap-4 p-4 rounded-lg border border-border/50 transition-colors hover:bg-muted/30">
                   <div className="space-y-1">
-                    <div className="text-sm font-medium">Featured template (Ultra)</div>
+                    <div className="text-sm font-medium">Featured Template</div>
                     <div className="text-xs text-muted-foreground">
                       {templateFeatured.isUltraFeatured ? (
-                        <>Currently featured{templateFeatured.position ? ` (position ${templateFeatured.position})` : ''}.</>
+                        <span className="text-foreground/80">
+                          Currently featured{templateFeatured.position ? ` at position ${templateFeatured.position}` : ''}
+                        </span>
                       ) : (
-                        <>Not featured.</>
+                        'Not currently featured'
                       )}
                     </div>
                   </div>
-                  <Button onClick={toggleTemplateFeatured} disabled={templateFeatured.loading}>
-                    {templateFeatured.isUltraFeatured ? 'Unfeature' : 'Mark as Featured'}
+                  <Button
+                    size="sm"
+                    variant={templateFeatured.isUltraFeatured ? "secondary" : "default"}
+                    onClick={toggleTemplateFeatured}
+                    disabled={templateFeatured.loading}
+                  >
+                    {templateFeatured.isUltraFeatured ? 'Remove' : 'Feature'}
                   </Button>
                 </div>
 
-                <div className="flex items-center justify-between gap-3 rounded-md border p-3">
+                <div className="flex items-center justify-between gap-4 p-4 rounded-lg border border-border/50 transition-colors hover:bg-muted/30">
                   <div className="space-y-1">
-                    <div className="text-sm font-medium">Featured author</div>
+                    <div className="text-sm font-medium">Featured Author</div>
                     <div className="text-xs text-muted-foreground">
-                      {authorFeatured ? 'Currently featured.' : 'Not featured.'}
+                      {authorFeatured ? (
+                        <span className="text-foreground/80">Currently featured</span>
+                      ) : (
+                        'Not currently featured'
+                      )}
                     </div>
                   </div>
-                  <Button onClick={toggleAuthorFeatured} disabled={!canFeatureAuthor}>
-                    {authorFeatured ? 'Unfeature Author' : 'Mark Author as Featured'}
+                  <Button
+                    size="sm"
+                    variant={authorFeatured ? "secondary" : "default"}
+                    onClick={toggleAuthorFeatured}
+                    disabled={!canFeatureAuthor}
+                  >
+                    {authorFeatured ? 'Remove' : 'Feature'}
                   </Button>
                 </div>
               </div>

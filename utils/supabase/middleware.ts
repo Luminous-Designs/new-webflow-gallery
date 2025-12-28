@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { createSupabaseFetch } from '@/utils/supabase/fetch'
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
@@ -16,6 +17,15 @@ export async function updateSession(request: NextRequest) {
     url,
     key,
     {
+      global: {
+        fetch: createSupabaseFetch({
+          timeoutMs: 12_000,
+          maxRetries: 1,
+          retryDelayMs: 200,
+          debugLabel: 'supabase(middleware)',
+          debug: process.env.NEXT_PUBLIC_DEBUG_SUPABASE === 'true',
+        }),
+      },
       cookies: {
         getAll() {
           return request.cookies.getAll()
@@ -36,9 +46,7 @@ export async function updateSession(request: NextRequest) {
   // IMPORTANT: Do not use getSession() here.
   // getSession() is not secure in server context - use getUser() instead.
   // See: https://supabase.com/docs/guides/auth/server-side/nextjs
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  await supabase.auth.getUser()
 
   // Optional: Redirect unauthenticated users from protected routes
   // if (

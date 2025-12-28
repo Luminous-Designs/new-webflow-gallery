@@ -1,6 +1,5 @@
 'use client';
 
-import { Badge } from '@/components/ui/badge';
 import { Slider } from '@/components/ui/slider';
 import type { FreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 
@@ -31,6 +30,68 @@ export const DEFAULT_SCREENSHOT_SETTINGS: ScreenshotSettings = {
   screenshotWebpQuality: 75,
 };
 
+function SliderRow({
+  label,
+  value,
+  unit,
+  sliderValue,
+  onValueChange,
+  min,
+  max,
+  step,
+  disabled,
+}: {
+  label: string;
+  value: string | number;
+  unit?: string;
+  sliderValue: number[];
+  onValueChange: (value: number[]) => void;
+  min: number;
+  max: number;
+  step: number;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="group/row space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-muted-foreground group-hover/row:text-foreground transition-colors">
+          {label}
+        </span>
+        <span className="tabular-nums text-xs font-semibold text-foreground min-w-[4rem] text-right">
+          {value}{unit}
+        </span>
+      </div>
+      <Slider
+        value={sliderValue}
+        onValueChange={onValueChange}
+        min={min}
+        max={max}
+        step={step}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
+function SettingsSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-4 rounded-lg border border-border/60 bg-muted/30 p-4">
+      <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        {title}
+      </div>
+      <div className="space-y-4">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export function ScreenshotSettingsPanel({
   value,
   onChange,
@@ -41,75 +102,63 @@ export function ScreenshotSettingsPanel({
   disabled?: boolean;
 }) {
   return (
-    <div className="space-y-5">
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-sm font-medium">Navigation timeout</span>
-          <Badge variant="secondary">{value.timeout}ms</Badge>
-        </div>
-        <Slider
-          value={[value.timeout]}
+    <div className="space-y-4">
+      {/* Timing Section */}
+      <SettingsSection title="Timing">
+        <SliderRow
+          label="Navigation timeout"
+          value={(value.timeout / 1000).toFixed(0)}
+          unit="s"
+          sliderValue={[value.timeout]}
           onValueChange={([v]) => onChange({ timeout: v })}
           min={10_000}
           max={120_000}
           step={5_000}
           disabled={disabled}
         />
-      </div>
-
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-sm font-medium">Base animation wait</span>
-          <Badge variant="secondary">{value.screenshotAnimationWaitMs}ms</Badge>
-        </div>
-        <Slider
-          value={[value.screenshotAnimationWaitMs]}
+        <SliderRow
+          label="Animation wait"
+          value={(value.screenshotAnimationWaitMs / 1000).toFixed(1)}
+          unit="s"
+          sliderValue={[value.screenshotAnimationWaitMs]}
           onValueChange={([v]) => onChange({ screenshotAnimationWaitMs: v })}
           min={500}
           max={10_000}
           step={250}
           disabled={disabled}
         />
-      </div>
+      </SettingsSection>
 
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <span className="text-sm font-medium">Nudge scroll amount</span>
-          <Badge variant="secondary">{Math.round(value.screenshotNudgeScrollRatio * 100)}%</Badge>
-        </div>
-        <Slider
-          value={[value.screenshotNudgeScrollRatio]}
+      {/* Scroll Behavior Section */}
+      <SettingsSection title="Scroll Behavior">
+        <SliderRow
+          label="Nudge scroll amount"
+          value={Math.round(value.screenshotNudgeScrollRatio * 100)}
+          unit="%"
+          sliderValue={[value.screenshotNudgeScrollRatio]}
           onValueChange={([v]) => onChange({ screenshotNudgeScrollRatio: v })}
           min={0}
           max={0.5}
           step={0.05}
           disabled={disabled}
         />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">Wait after nudge</span>
-            <Badge variant="secondary">{value.screenshotNudgeWaitMs}ms</Badge>
-          </div>
-          <Slider
-            value={[value.screenshotNudgeWaitMs]}
+        <div className="grid grid-cols-2 gap-4">
+          <SliderRow
+            label="Wait after nudge"
+            value={value.screenshotNudgeWaitMs}
+            unit="ms"
+            sliderValue={[value.screenshotNudgeWaitMs]}
             onValueChange={([v]) => onChange({ screenshotNudgeWaitMs: v })}
             min={0}
             max={3000}
             step={100}
             disabled={disabled}
           />
-        </div>
-
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">Wait after return</span>
-            <Badge variant="secondary">{value.screenshotNudgeAfterMs}ms</Badge>
-          </div>
-          <Slider
-            value={[value.screenshotNudgeAfterMs]}
+          <SliderRow
+            label="Wait after return"
+            value={value.screenshotNudgeAfterMs}
+            unit="ms"
+            sliderValue={[value.screenshotNudgeAfterMs]}
             onValueChange={([v]) => onChange({ screenshotNudgeAfterMs: v })}
             min={0}
             max={3000}
@@ -117,47 +166,38 @@ export function ScreenshotSettingsPanel({
             disabled={disabled}
           />
         </div>
-      </div>
+      </SettingsSection>
 
-      <div className="space-y-3 rounded-md border p-3">
-        <div className="text-sm font-semibold">Stability</div>
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">Stable window</span>
-            <Badge variant="secondary">{value.screenshotStabilityStableMs}ms</Badge>
-          </div>
-          <Slider
-            value={[value.screenshotStabilityStableMs]}
-            onValueChange={([v]) => onChange({ screenshotStabilityStableMs: v })}
-            min={250}
-            max={5000}
-            step={250}
-            disabled={disabled}
-          />
-        </div>
-
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">Max wait</span>
-            <Badge variant="secondary">{value.screenshotStabilityMaxWaitMs}ms</Badge>
-          </div>
-          <Slider
-            value={[value.screenshotStabilityMaxWaitMs]}
+      {/* Stability Section */}
+      <SettingsSection title="Stability Detection">
+        <SliderRow
+          label="Stable window"
+          value={value.screenshotStabilityStableMs}
+          unit="ms"
+          sliderValue={[value.screenshotStabilityStableMs]}
+          onValueChange={([v]) => onChange({ screenshotStabilityStableMs: v })}
+          min={250}
+          max={5000}
+          step={250}
+          disabled={disabled}
+        />
+        <div className="grid grid-cols-2 gap-4">
+          <SliderRow
+            label="Max wait"
+            value={(value.screenshotStabilityMaxWaitMs / 1000).toFixed(1)}
+            unit="s"
+            sliderValue={[value.screenshotStabilityMaxWaitMs]}
             onValueChange={([v]) => onChange({ screenshotStabilityMaxWaitMs: v })}
             min={1000}
             max={20_000}
             step={500}
             disabled={disabled}
           />
-        </div>
-
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">Check interval</span>
-            <Badge variant="secondary">{value.screenshotStabilityCheckIntervalMs}ms</Badge>
-          </div>
-          <Slider
-            value={[value.screenshotStabilityCheckIntervalMs]}
+          <SliderRow
+            label="Check interval"
+            value={value.screenshotStabilityCheckIntervalMs}
+            unit="ms"
+            sliderValue={[value.screenshotStabilityCheckIntervalMs]}
             onValueChange={([v]) => onChange({ screenshotStabilityCheckIntervalMs: v })}
             min={100}
             max={1000}
@@ -165,31 +205,27 @@ export function ScreenshotSettingsPanel({
             disabled={disabled}
           />
         </div>
-      </div>
+      </SettingsSection>
 
-      <div className="space-y-3 rounded-md border p-3">
-        <div className="text-sm font-semibold">Quality</div>
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">Capture JPEG quality</span>
-            <Badge variant="secondary">{value.screenshotJpegQuality}</Badge>
-          </div>
-          <Slider
-            value={[value.screenshotJpegQuality]}
+      {/* Quality Section */}
+      <SettingsSection title="Output Quality">
+        <div className="grid grid-cols-2 gap-4">
+          <SliderRow
+            label="JPEG quality"
+            value={value.screenshotJpegQuality}
+            unit="%"
+            sliderValue={[value.screenshotJpegQuality]}
             onValueChange={([v]) => onChange({ screenshotJpegQuality: v })}
             min={50}
             max={95}
             step={5}
             disabled={disabled}
           />
-        </div>
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">Saved WebP quality</span>
-            <Badge variant="secondary">{value.screenshotWebpQuality}</Badge>
-          </div>
-          <Slider
-            value={[value.screenshotWebpQuality]}
+          <SliderRow
+            label="WebP quality"
+            value={value.screenshotWebpQuality}
+            unit="%"
+            sliderValue={[value.screenshotWebpQuality]}
             onValueChange={([v]) => onChange({ screenshotWebpQuality: v })}
             min={40}
             max={95}
@@ -197,7 +233,7 @@ export function ScreenshotSettingsPanel({
             disabled={disabled}
           />
         </div>
-      </div>
+      </SettingsSection>
     </div>
   );
 }

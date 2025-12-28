@@ -6,6 +6,8 @@ export const revalidate = 300;
 
 export async function GET() {
   try {
+    const cacheControl = 'public, max-age=0, s-maxage=300, stale-while-revalidate=3600';
+
     // Fast path: view with counts (single query)
     const { data, error } = await supabaseAdmin
       .from('styles_with_counts')
@@ -15,7 +17,8 @@ export async function GET() {
 
     if (!error && data) {
       const res = NextResponse.json(data);
-      res.headers.set('Cache-Control', 'public, max-age=0, s-maxage=300, stale-while-revalidate=3600');
+      res.headers.set('Cache-Control', cacheControl);
+      res.headers.set('CDN-Cache-Control', cacheControl);
       return res;
     }
 
@@ -41,7 +44,10 @@ export async function GET() {
       return (a.display_name || '').localeCompare(b.display_name || '');
     });
 
-    return NextResponse.json(stylesWithCounts);
+    const res = NextResponse.json(stylesWithCounts);
+    res.headers.set('Cache-Control', cacheControl);
+    res.headers.set('CDN-Cache-Control', cacheControl);
+    return res;
   } catch (error) {
     console.error('Failed to fetch styles:', error);
     return NextResponse.json(

@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
+import { createSupabaseFetch } from '@/utils/supabase/fetch'
 
 export async function createClient() {
   const cookieStore = await cookies()
@@ -13,6 +14,15 @@ export async function createClient() {
     url,
     key,
     {
+      global: {
+        fetch: createSupabaseFetch({
+          timeoutMs: 12_000,
+          maxRetries: 1,
+          retryDelayMs: 200,
+          debugLabel: 'supabase(server)',
+          debug: process.env.NEXT_PUBLIC_DEBUG_SUPABASE === 'true',
+        }),
+      },
       cookies: {
         getAll() {
           return cookieStore.getAll()

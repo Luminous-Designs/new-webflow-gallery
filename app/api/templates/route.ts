@@ -37,7 +37,9 @@ type TemplateRow = Record<string, unknown> & { id: number; author_id?: string | 
 
 function jsonResponse(body: unknown, init?: Parameters<typeof NextResponse.json>[1]) {
   const res = NextResponse.json(body, init);
-  res.headers.set('Cache-Control', 'public, max-age=0, s-maxage=60, stale-while-revalidate=300');
+  const cacheControl = 'public, max-age=0, s-maxage=60, stale-while-revalidate=300';
+  res.headers.set('Cache-Control', cacheControl);
+  res.headers.set('CDN-Cache-Control', cacheControl);
   return res;
 }
 

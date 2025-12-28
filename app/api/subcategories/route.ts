@@ -6,6 +6,8 @@ export const revalidate = 300;
 
 export async function GET() {
   try {
+    const cacheControl = 'public, max-age=0, s-maxage=300, stale-while-revalidate=3600';
+
     // Fast path: view with counts (single query)
     const { data, error } = await supabaseAdmin
       .from('subcategories_with_counts')
@@ -14,7 +16,8 @@ export async function GET() {
 
     if (!error && data) {
       const res = NextResponse.json(data);
-      res.headers.set('Cache-Control', 'public, max-age=0, s-maxage=300, stale-while-revalidate=3600');
+      res.headers.set('Cache-Control', cacheControl);
+      res.headers.set('CDN-Cache-Control', cacheControl);
       return res;
     }
 
@@ -36,7 +39,10 @@ export async function GET() {
     );
 
     subcategoriesWithCounts.sort((a, b) => b.template_count - a.template_count);
-    return NextResponse.json(subcategoriesWithCounts);
+    const res = NextResponse.json(subcategoriesWithCounts);
+    res.headers.set('Cache-Control', cacheControl);
+    res.headers.set('CDN-Cache-Control', cacheControl);
+    return res;
 
   } catch (error) {
     console.error('Subcategories API error:', error);
