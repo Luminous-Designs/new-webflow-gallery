@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { chromium } from 'playwright';
 import { supabaseAdmin } from '@/lib/supabase';
 import { requireAdminUser } from '@/lib/admin/auth';
-import { enqueueAdminGalleryJob, getAdminGalleryJobsSnapshot, type AdminGalleryJobType } from '@/lib/admin/gallery-jobs';
+import { cancelAllAdminGalleryJobs, enqueueAdminGalleryJob, getAdminGalleryJobsSnapshot, type AdminGalleryJobType } from '@/lib/admin/gallery-jobs';
 import { clampFreshScraperConfig, type FreshScraperConfig } from '@/lib/scraper/fresh-scraper';
 import { isR2Configured } from '@/lib/r2';
 
@@ -53,6 +53,20 @@ export async function GET(request: NextRequest) {
   const admin = await requireAdminUser(request);
   if (!admin.ok) return json({ error: admin.error }, admin.status);
   return json(getAdminGalleryJobsSnapshot());
+}
+
+export async function DELETE(request: NextRequest) {
+  const admin = await requireAdminUser(request);
+  if (!admin.ok) return json({ error: admin.error }, admin.status);
+
+  try {
+    await cancelAllAdminGalleryJobs('Canceled by admin');
+    return json(getAdminGalleryJobsSnapshot());
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    console.error('[AdminJobs] Cancel all failed:', msg);
+    return json({ error: msg }, 500);
+  }
 }
 
 export async function POST(request: NextRequest) {

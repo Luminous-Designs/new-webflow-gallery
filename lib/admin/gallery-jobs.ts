@@ -13,7 +13,7 @@ export interface AdminGalleryJobItem {
   slug: string;
   name: string | null;
   storefrontUrl: string;
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped';
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'canceled';
   screenshotPath?: string;
   error?: string;
 }
@@ -95,6 +95,9 @@ const queue: AdminGalleryJob[] = [];
 let active: AdminGalleryJob | null = null;
 const history: AdminGalleryJob[] = [];
 let isProcessing = false;
+let activeScraper: FreshScraper | null = null;
+let cancelActiveRequested = false;
+let cancelActiveReason = 'Canceled by admin';
 
 export function getAdminGalleryJobsSnapshot(): {
   active: AdminGalleryJob | null;
@@ -106,6 +109,37 @@ export function getAdminGalleryJobsSnapshot(): {
     queue: [...queue],
     history: [...history].slice(0, 50),
   };
+}
+
+export async function cancelAllAdminGalleryJobs(reason = 'Canceled by admin'): Promise<void> {
+  cancelActiveReason = reason;
+
+  // Cancel queued jobs immediately.
+  while (queue.length) {
+    const job = queue.shift();
+    if (!job) break;
+    job.status = 'canceled';
+    job.lastError = reason;
+    job.finishedAt = nowIso();
+    job.items = job.items.map((i) => ({
+      ...i,
+      status: i.status === 'succeeded' || i.status === 'failed' || i.status === 'skipped' ? i.status : 'canceled',
+      error: i.error || reason,
+    }));
+    history.unshift(job);
+  }
+  if (history.length > 200) history.splice(200);
+
+  // Request cancellation for the currently running job (handled by processQueue).
+  if (active && active.status === 'running') {
+    cancelActiveRequested = true;
+    active.lastError = reason;
+    try {
+      await activeScraper?.close();
+    } catch {
+      // ignore
+    }
+  }
 }
 
 export function enqueueAdminGalleryJob(input: {
@@ -184,6 +218,7 @@ async function runJob(job: AdminGalleryJob): Promise<void> {
   const urls = job.items.map((i) => i.slug);
 
   const scraper = new FreshScraper(jobConfig);
+  activeScraper = scraper;
   await scraper.init(false);
 
   scraper.on('progress', (p) => {
@@ -227,6 +262,7 @@ async function runJob(job: AdminGalleryJob): Promise<void> {
     } catch {
       // ignore
     }
+    if (activeScraper === scraper) activeScraper = null;
   }
 }
 
@@ -242,14 +278,31 @@ async function processQueue(): Promise<void> {
       active = next;
       active.status = 'running';
       active.startedAt = nowIso();
+      cancelActiveRequested = false;
+      cancelActiveReason = 'Canceled by admin';
 
       try {
         await runJob(active);
-        active.status = 'succeeded';
+        if (cancelActiveRequested) {
+          active.status = 'canceled';
+          active.lastError = cancelActiveReason;
+          active.items = active.items.map((i) => ({
+            ...i,
+            status: i.status === 'succeeded' || i.status === 'failed' || i.status === 'skipped' ? i.status : 'canceled',
+            error: i.error || cancelActiveReason,
+          }));
+        } else {
+          active.status = 'succeeded';
+        }
       } catch (error) {
-        const msg = error instanceof Error ? error.message : 'Unknown error';
-        active.status = 'failed';
-        active.lastError = msg;
+        if (cancelActiveRequested) {
+          active.status = 'canceled';
+          active.lastError = cancelActiveReason;
+        } else {
+          const msg = error instanceof Error ? error.message : 'Unknown error';
+          active.status = 'failed';
+          active.lastError = msg;
+        }
       } finally {
         active.finishedAt = nowIso();
         history.unshift(active);
@@ -258,6 +311,8 @@ async function processQueue(): Promise<void> {
       }
     }
   } finally {
+    activeScraper = null;
+    cancelActiveRequested = false;
     isProcessing = false;
   }
 }

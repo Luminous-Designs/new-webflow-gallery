@@ -1,11 +1,14 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { useAuth } from '@/components/auth/auth-context';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
+import { Badge } from '@/components/ui/badge';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Loader2, XCircle, ListChecks, CircleDot, Clock, CheckCircle2, AlertTriangle } from 'lucide-react';
 import type { AdminGalleryJob } from '@/lib/admin/gallery-jobs';
 
 type Snapshot = {
@@ -14,6 +17,33 @@ type Snapshot = {
   history: AdminGalleryJob[];
 };
 
+const OPEN_KEY = 'admin_queue_popup_open_v1';
+
+function statusBadgeVariant(status: string): { label: string; className: string; icon: ReactNode } {
+  switch (status) {
+    case 'running':
+      return { label: 'Running', className: 'bg-blue-100 text-blue-700 border-blue-200', icon: <CircleDot className="h-3.5 w-3.5" /> };
+    case 'queued':
+      return { label: 'Queued', className: 'bg-neutral-100 text-neutral-700 border-neutral-200', icon: <Clock className="h-3.5 w-3.5" /> };
+    case 'succeeded':
+      return { label: 'Succeeded', className: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: <CheckCircle2 className="h-3.5 w-3.5" /> };
+    case 'failed':
+      return { label: 'Failed', className: 'bg-red-100 text-red-700 border-red-200', icon: <AlertTriangle className="h-3.5 w-3.5" /> };
+    case 'canceled':
+      return { label: 'Canceled', className: 'bg-amber-100 text-amber-800 border-amber-200', icon: <XCircle className="h-3.5 w-3.5" /> };
+    case 'skipped':
+      return { label: 'Skipped', className: 'bg-zinc-100 text-zinc-700 border-zinc-200', icon: <ListChecks className="h-3.5 w-3.5" /> };
+    default:
+      return { label: status, className: 'bg-neutral-100 text-neutral-700 border-neutral-200', icon: <ListChecks className="h-3.5 w-3.5" /> };
+  }
+}
+
+function extractApiError(data: unknown): string | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const record = data as Record<string, unknown>;
+  return typeof record.error === 'string' ? record.error : null;
+}
+
 export function AdminQueueWidget({
   onTemplateScreenshotUpdated,
 }: {
@@ -21,8 +51,33 @@ export function AdminQueueWidget({
 }) {
   const { isAdmin, session } = useAuth();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [open, setOpen] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
   const completedToastIdsRef = useRef<Set<string>>(new Set());
   const seenScreenshotRef = useRef<Map<number, string>>(new Map());
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    try {
+      const stored = window.localStorage.getItem(OPEN_KEY);
+      if (stored === '1') setOpen(true);
+    } catch {
+      // ignore
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    try {
+      window.localStorage.setItem(OPEN_KEY, open ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  }, [isAdmin, open]);
+
+  useEffect(() => {
+    if (!open) setConfirmCancel(false);
+  }, [open]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -111,100 +166,251 @@ export function AdminQueueWidget({
   const activeJob = snapshot?.active || null;
 
   if (!isAdmin) return null;
-  if (!snapshot?.active && (!snapshot?.queue || snapshot.queue.length === 0) && (!snapshot?.history || snapshot.history.length === 0)) {
+  // Persistently show the widget for admins while loading so it appears immediately after reload.
+  if (!snapshot) {
+    return (
+      <div className="fixed bottom-4 right-4 z-50">
+        <Button variant="secondary" className="shadow-lg rounded-none flex items-center gap-2" disabled>
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Queue…
+        </Button>
+      </div>
+    );
+  }
+
+  // If nothing is happening, hide completely.
+  if (!snapshot.active && snapshot.queue.length === 0 && snapshot.history.length === 0) {
     return null;
   }
 
+  const runningItemName = activeJob?.items?.find((i) => i.status === 'running')?.name ||
+    activeJob?.items?.find((i) => i.status === 'running')?.slug ||
+    activeJob?.templateName ||
+    activeJob?.templateSlug ||
+    null;
+
+  const cancelAll = async () => {
+    try {
+      const token = session?.access_token;
+      const headers: HeadersInit | undefined = token ? { Authorization: `Bearer ${token}` } : undefined;
+      const res = await fetch('/api/admin/gallery-jobs', { method: 'DELETE', headers, credentials: 'same-origin' });
+      let data: unknown = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+      if (!res.ok) {
+        throw new Error(extractApiError(data) || 'Failed to cancel queue');
+      }
+      setSnapshot(data as Snapshot);
+      setConfirmCancel(false);
+      toast.success('Canceled queue');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to cancel queue';
+      toast.error(msg);
+    }
+  };
+
   return (
     <div className="fixed bottom-4 right-4 z-50">
-      <Dialog>
+      <Dialog open={open} onOpenChange={setOpen}>
         <DialogTrigger asChild>
-          <Button variant="secondary" className="shadow-lg rounded-none">
+          <Button
+            variant="secondary"
+            className="shadow-lg rounded-none flex items-center gap-2 border border-neutral-200 bg-white/90 backdrop-blur hover:bg-white"
+          >
             {counts.active ? (
-              <>Processing ({counts.active.progress.processed}/{counts.active.progress.total})</>
+              <>
+                <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+                <span className="font-medium">Processing</span>
+                <span className="text-xs text-neutral-500">
+                  {counts.active.progress.processed}/{counts.active.progress.total}
+                </span>
+              </>
             ) : (
-              <>Queue ({counts.queuedJobs})</>
+              <>
+                <Clock className="h-4 w-4 text-neutral-600" />
+                <span className="font-medium">Queue</span>
+                <span className="text-xs text-neutral-500">{counts.queuedJobs} job(s)</span>
+              </>
             )}
           </Button>
         </DialogTrigger>
 
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Admin Screenshot Queue</DialogTitle>
+        <DialogContent className="sm:max-w-5xl h-[85vh] p-0 gap-0 overflow-hidden">
+          <DialogHeader className="px-6 py-4 border-b bg-white/80 backdrop-blur flex-row items-center justify-between space-y-0">
+            <div className="space-y-1">
+              <DialogTitle className="text-base">Admin Screenshot Queue</DialogTitle>
+              <div className="text-xs text-neutral-500">
+                {counts.active ? (
+                  <>Now running: <span className="text-neutral-900 font-medium">{activeJob?.type}</span>{runningItemName ? ` — ${runningItemName}` : ''}</>
+                ) : (
+                  <>No active job — {counts.queuedJobs} queued</>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {confirmCancel ? (
+                <>
+                  <span className="text-xs text-neutral-600 mr-2">Cancel everything?</span>
+                  <Button size="sm" variant="destructive" onClick={() => void cancelAll()}>
+                    Confirm
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setConfirmCancel(false)}>
+                    Keep
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-red-600 border-red-200 hover:bg-red-50"
+                  onClick={() => setConfirmCancel(true)}
+                  disabled={!snapshot.active && snapshot.queue.length === 0}
+                >
+                  <XCircle className="h-4 w-4 mr-2" />
+                  Cancel All
+                </Button>
+              )}
+            </div>
           </DialogHeader>
 
-          {activeJob ? (
-            <div className="space-y-2">
-              <div className="text-sm font-medium">
-                Running: {activeJob.type}
-              </div>
-              <Progress value={counts.activePercent} />
-              <div className="text-xs text-muted-foreground">
-                {activeJob.progress.processed}/{activeJob.progress.total} processed
-              </div>
-              <div className="max-h-48 overflow-auto border">
-                {activeJob.items.map((i) => (
-                  <div key={`${activeJob.id}-${i.templateId}`} className="border-b p-2 text-xs">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="font-medium">{i.name || i.slug}</div>
-                      <div className="text-muted-foreground">{i.status}</div>
+          <div className="p-6 space-y-6 h-[calc(85vh-64px)] overflow-hidden bg-neutral-50">
+            {activeJob ? (
+              <div className="bg-white border border-neutral-200 shadow-sm">
+                <div className="p-4 border-b flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      {activeJob.type}
+                    </Badge>
+                    <div className="text-sm font-medium truncate">
+                      {runningItemName ? runningItemName : 'Working…'}
                     </div>
-                    {i.error ? <div className="text-red-600 mt-1">{i.error}</div> : null}
                   </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {snapshot.queue.length ? (
-            <div className="space-y-2">
-              <div className="text-sm font-medium">Queued</div>
-              <div className="max-h-64 overflow-auto border">
-                {snapshot.queue.map((job) => (
-                  <div key={job.id} className="border-b p-2 text-sm">
-                    <div className="font-medium">{job.type}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {job.items.length} item(s)
+                  <div className="text-xs text-neutral-500 shrink-0">
+                    {activeJob.progress.processed}/{activeJob.progress.total} processed
+                  </div>
+                </div>
+                <div className="p-4 space-y-3">
+                  <Progress value={counts.activePercent} />
+                  <ScrollArea className="h-56 border border-neutral-100">
+                    <div className="divide-y">
+                      {activeJob.items.map((i) => {
+                        const badge = statusBadgeVariant(i.status);
+                        return (
+                          <div key={`${activeJob.id}-${i.templateId}`} className="px-3 py-2 text-sm flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="font-medium truncate">{i.name || i.slug}</div>
+                              {i.error ? (
+                                <div className="text-xs text-red-600 mt-0.5 break-words">{i.error}</div>
+                              ) : null}
+                            </div>
+                            <Badge variant="outline" className={`shrink-0 flex items-center gap-1.5 ${badge.className}`}>
+                              {badge.icon}
+                              {badge.label}
+                            </Badge>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <div className="mt-2 max-h-36 overflow-auto border">
-                      {job.items.map((i) => (
-                        <div key={`${job.id}-${i.templateId}`} className="border-b p-2 text-xs">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="font-medium">{i.name || i.slug}</div>
-                            <div className="text-muted-foreground">{i.status}</div>
+                  </ScrollArea>
+                </div>
+              </div>
+            ) : null}
+
+            {snapshot.queue.length ? (
+              <div className="bg-white border border-neutral-200 shadow-sm overflow-hidden">
+                <div className="p-4 border-b flex items-center justify-between">
+                  <div className="text-sm font-medium">Queued jobs</div>
+                  <div className="text-xs text-neutral-500">
+                    {snapshot.queue.length} job(s), {counts.totalQueuedItems} item(s)
+                  </div>
+                </div>
+                <ScrollArea className="h-64">
+                  <div className="divide-y">
+                    {snapshot.queue.map((job) => (
+                      <div key={job.id} className="p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <Badge variant="outline" className="font-mono text-[10px]">
+                              {job.type}
+                            </Badge>
+                            <div className="text-sm font-medium truncate">
+                              {job.templateName || job.templateSlug || `${job.items.length} item(s)`}
+                            </div>
+                          </div>
+                          <div className="text-xs text-neutral-500 shrink-0">{job.items.length} item(s)</div>
+                        </div>
+                        <div className="mt-3 border border-neutral-100">
+                          <div className="divide-y">
+                            {job.items.slice(0, 10).map((i) => {
+                              const badge = statusBadgeVariant(i.status);
+                              return (
+                                <div key={`${job.id}-${i.templateId}`} className="px-3 py-2 text-xs flex items-center justify-between gap-3">
+                                  <div className="truncate">{i.name || i.slug}</div>
+                                  <Badge variant="outline" className={`shrink-0 flex items-center gap-1.5 ${badge.className}`}>
+                                    {badge.icon}
+                                    {badge.label}
+                                  </Badge>
+                                </div>
+                              );
+                            })}
+                            {job.items.length > 10 ? (
+                              <div className="px-3 py-2 text-xs text-neutral-500">+ {job.items.length - 10} more…</div>
+                            ) : null}
                           </div>
                         </div>
-                      ))}
-                    </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                </ScrollArea>
               </div>
-            </div>
-          ) : null}
+            ) : null}
 
-          {snapshot.history.length ? (
-            <div className="space-y-2">
-              <div className="text-sm font-medium">Recent</div>
-              <div className="max-h-64 overflow-auto border">
-                {snapshot.history.slice(0, 20).map((job) => (
-                  <div key={job.id} className="border-b p-2 text-sm">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="font-medium">{job.type}</div>
-                      <div className="text-xs text-muted-foreground">{job.status}</div>
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {job.items.filter((i) => i.status === 'succeeded').length} succeeded,{' '}
-                      {job.items.filter((i) => i.status === 'skipped').length} skipped,{' '}
-                      {job.items.filter((i) => i.status === 'failed').length} failed
-                    </div>
-                    {job.lastError ? (
-                      <div className="text-xs text-red-600 mt-1">{job.lastError}</div>
-                    ) : null}
+            {snapshot.history.length ? (
+              <div className="bg-white border border-neutral-200 shadow-sm overflow-hidden">
+                <div className="p-4 border-b flex items-center justify-between">
+                  <div className="text-sm font-medium">Recent</div>
+                  <div className="text-xs text-neutral-500">Last 20 jobs</div>
+                </div>
+                <ScrollArea className="h-48">
+                  <div className="divide-y">
+                    {snapshot.history.slice(0, 20).map((job) => {
+                      const badge = statusBadgeVariant(job.status);
+                      const succeeded = job.items.filter((i) => i.status === 'succeeded').length;
+                      const skipped = job.items.filter((i) => i.status === 'skipped').length;
+                      const failed = job.items.filter((i) => i.status === 'failed').length;
+                      const canceled = job.items.filter((i) => i.status === 'canceled').length;
+                      return (
+                        <div key={job.id} className="p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <Badge variant="outline" className="font-mono text-[10px]">
+                                {job.type}
+                              </Badge>
+                              <div className="text-sm font-medium truncate">
+                                {job.templateName || job.templateSlug || job.id}
+                              </div>
+                            </div>
+                            <Badge variant="outline" className={`shrink-0 flex items-center gap-1.5 ${badge.className}`}>
+                              {badge.icon}
+                              {badge.label}
+                            </Badge>
+                          </div>
+                          <div className="mt-1 text-xs text-neutral-500">
+                            {succeeded} succeeded{skipped ? `, ${skipped} skipped` : ''}{failed ? `, ${failed} failed` : ''}{canceled ? `, ${canceled} canceled` : ''}
+                          </div>
+                          {job.lastError ? <div className="mt-1 text-xs text-red-600 break-words">{job.lastError}</div> : null}
+                        </div>
+                      );
+                    })}
                   </div>
-                ))}
+                </ScrollArea>
               </div>
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </DialogContent>
       </Dialog>
     </div>
