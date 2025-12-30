@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import fs from 'node:fs';
 import { chromium } from 'playwright';
 import { supabaseAdmin } from '@/lib/supabase';
 import { requireAdminUser } from '@/lib/admin/auth';
@@ -24,6 +25,21 @@ function normalizeSelectorInput(input: string): string {
 export async function POST(request: NextRequest) {
   const admin = await requireAdminUser(request);
   if (!admin.ok) return json({ error: admin.error }, admin.status);
+
+  // Preflight: this endpoint relies on Playwright Chromium being present in the deployment.
+  try {
+    const executablePath = chromium.executablePath();
+    if (executablePath && !fs.existsSync(executablePath)) {
+      console.error('[SelectorValidate] Playwright Chromium missing at:', executablePath);
+      return json({
+        ok: false,
+        error: 'Playwright Chromium is not installed in this deployment. Add a Coolify build step: `npx playwright install --with-deps chromium`.',
+      }, 500);
+    }
+  } catch (e) {
+    console.error('[SelectorValidate] Playwright preflight failed:', e);
+    return json({ ok: false, error: 'Playwright is not available in this deployment.' }, 500);
+  }
 
   let body: unknown;
   try {
@@ -54,11 +70,12 @@ export async function POST(request: NextRequest) {
 
   const normalizedSelector = normalizeSelectorInput(selector);
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-  });
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
   try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
     const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
     const page = await context.newPage();
 
@@ -78,7 +95,11 @@ export async function POST(request: NextRequest) {
       matchCount: matchCount >= 0 ? matchCount : 0,
       normalizedSelector,
     });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    console.error('[SelectorValidate] Failed:', msg);
+    return json({ ok: false, error: msg }, 500);
   } finally {
-    await browser.close();
+    await browser?.close().catch(() => undefined);
   }
 }

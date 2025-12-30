@@ -36,6 +36,24 @@ function persistSettings(next: ScreenshotSettings) {
   }
 }
 
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function readJsonResponse(res: Response): Promise<JsonObject> {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (isJsonObject(parsed)) return parsed;
+    return { value: parsed };
+  } catch {
+    return { error: text };
+  }
+}
+
 export function AdminTemplateToolsDialog({
   template,
   open,
@@ -155,15 +173,19 @@ export function AdminTemplateToolsDialog({
         credentials: 'same-origin',
         body: JSON.stringify({ templateId: template.id, selector: raw }),
       });
-      const data = await res.json();
+      const data = await readJsonResponse(res);
       if (!res.ok || data?.ok === false) {
-        throw new Error(data?.error || 'Selector validation failed');
+        const serverError = typeof data.error === 'string' ? data.error : null;
+        throw new Error(serverError || `Selector validation failed (HTTP ${res.status})`);
       }
-      if (data?.exists) {
-        setSelectorValidation({ state: 'valid', matchCount: data.matchCount || 1, normalizedSelector: data.normalizedSelector || raw });
+      const exists = Boolean(data.exists);
+      const matchCount = typeof data.matchCount === 'number' ? data.matchCount : 0;
+      const normalizedSelector = typeof data.normalizedSelector === 'string' ? data.normalizedSelector : raw;
+      if (exists) {
+        setSelectorValidation({ state: 'valid', matchCount: matchCount || 1, normalizedSelector });
         toast.success('Selector found on page');
       } else {
-        setSelectorValidation({ state: 'invalid', error: 'Selector not found on page', normalizedSelector: data.normalizedSelector || raw });
+        setSelectorValidation({ state: 'invalid', error: 'Selector not found on page', normalizedSelector });
         toast.error('Selector not found on page');
       }
     } catch (e) {

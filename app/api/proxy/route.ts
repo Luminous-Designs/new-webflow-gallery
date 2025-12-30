@@ -51,6 +51,12 @@ export async function GET(request: NextRequest) {
 
     let html = await response.text();
 
+    // Strip Cloudflare analytics scripts that frequently trigger noisy CORS errors when proxied.
+    html = html.replace(
+      /<script[^>]*src=["'][^"']*(?:cdn-cgi\/rum|static\.cloudflareinsights\.com)[^"']*["'][^>]*>\s*<\/script>/gi,
+      ''
+    );
+
     // Inject base tag to ensure relative URLs work correctly
     const baseTag = `<base href="${url}" />`;
     html = html.replace(/<head[^>]*>/i, `$&\n${baseTag}`);
@@ -177,25 +183,63 @@ export async function GET(request: NextRequest) {
             return null;
           };
 
-          // Override location setters
-          const locationDescriptor = Object.getOwnPropertyDescriptor(window, 'location');
-          if (locationDescriptor) {
-            Object.defineProperty(window, 'location', {
-              get: locationDescriptor.get,
-              set: function(url) {
-                const absoluteUrl = getAbsoluteUrl(url);
-                if (isSameDomain(absoluteUrl)) {
-                  if (window.parent !== window) {
-                    window.parent.postMessage({
-                      type: 'navigation',
-                      url: absoluteUrl
-                    }, '*');
-                  }
+          // Best-effort overrides for JS-driven navigation.
+          // Note: window.location is non-configurable in most browsers, so redefining it can throw.
+          try {
+            const loc = window.location;
+            const originalAssign = loc.assign.bind(loc);
+            const originalReplace = loc.replace.bind(loc);
+
+            loc.assign = function(url) {
+              const absoluteUrl = getAbsoluteUrl(url);
+              if (isSameDomain(absoluteUrl)) {
+                if (window.parent !== window) {
+                  window.parent.postMessage({ type: 'navigation', url: absoluteUrl }, '*');
                 } else {
-                  console.warn('Location change blocked - external domain:', absoluteUrl);
+                  originalAssign(absoluteUrl);
                 }
+              } else {
+                console.warn('location.assign blocked - external domain:', absoluteUrl);
               }
-            });
+            };
+
+            loc.replace = function(url) {
+              const absoluteUrl = getAbsoluteUrl(url);
+              if (isSameDomain(absoluteUrl)) {
+                if (window.parent !== window) {
+                  window.parent.postMessage({ type: 'navigation', url: absoluteUrl }, '*');
+                } else {
+                  originalReplace(absoluteUrl);
+                }
+              } else {
+                console.warn('location.replace blocked - external domain:', absoluteUrl);
+              }
+            };
+          } catch (e) {
+            console.warn('Failed to override location methods:', e);
+          }
+
+          try {
+            const locationDescriptor = Object.getOwnPropertyDescriptor(window, 'location');
+            if (locationDescriptor && locationDescriptor.configurable) {
+              Object.defineProperty(window, 'location', {
+                get: locationDescriptor.get,
+                set: function(url) {
+                  const absoluteUrl = getAbsoluteUrl(url);
+                  if (isSameDomain(absoluteUrl)) {
+                    if (window.parent !== window) {
+                      window.parent.postMessage({ type: 'navigation', url: absoluteUrl }, '*');
+                    }
+                  } else {
+                    console.warn('Location change blocked - external domain:', absoluteUrl);
+                  }
+                }
+              });
+            } else {
+              console.log('window.location is not configurable; skipping setter override');
+            }
+          } catch (e) {
+            console.warn('Failed to override window.location property:', e);
           }
 
           // Override history methods

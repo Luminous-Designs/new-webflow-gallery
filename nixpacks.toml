@@ -1,0 +1,18 @@
+[variables]
+# Ensures Playwright browsers are installed into the app directory (baked into the image),
+# instead of relying on a per-container cache directory.
+PLAYWRIGHT_BROWSERS_PATH = "0"
+
+[phases.install]
+cmds = [
+  "npm ci",
+  # Installs Chromium + OS deps during the image build (Coolify/Nixpacks).
+  "npx playwright install --with-deps chromium"
+]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "npm run start"
+
